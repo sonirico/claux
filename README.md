@@ -38,12 +38,29 @@ bind C-a if-shell "tmux has-session -t claux 2>/dev/null" \
   "new-session -d -s claux -n console 'claux --console'; switch-client -t claux"
 ```
 
-Keys: enter jumps to the window, i types a line into the selected agent's
-pane without attaching (empty line = just Enter, to accept a default),
-n opens a new window in the selected window's directory, R sends
+Keys: enter opens focus mode on the selected window (see below), o jumps
+to the window / attaches (the old enter behavior), i types a line into the
+selected agent's pane without attaching (empty line = just Enter, to accept
+a default), n opens a new window in the selected window's directory, R sends
 `claude --continue` (resume an agent after a reboot/restore), x kills,
 / filters, j/k move, g/G first/last, r forces a refresh, q/esc quits.
 The list auto-refreshes every 500ms; the header shows fleet counters.
+
+## Focus mode (experimental)
+
+Enter on a selected window opens focus mode: the preview pane gets a green
+bold border and every key you press (including Esc, Tab, arrows and Ctrl
+combinations) is forwarded straight to that agent's tmux pane via
+`send-keys`, with no `tmux attach` involved. The window list stays visible
+on the left the whole time. Ctrl-q exits focus mode back to the list. While
+focused, the preview polls every 100ms instead of the normal 500ms list
+refresh, so output feels close to live.
+
+Known limitation: claux does not resize the pane to match the preview's
+width, so if the preview column is narrower or wider than the pane's real
+width, lines you'd expect to wrap may wrap differently (or not at all) in
+the preview. This is accepted for this experimental mode; use o to attach
+for anything that depends on exact wrapping.
 
 ## Surviving reboots
 

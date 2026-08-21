@@ -3,6 +3,7 @@
 //! single source of truth, and this module only reads and acts on them.
 
 use anyhow::{Context, Result, bail};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::process::Command;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -150,6 +151,74 @@ pub fn send_line(target: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Forward one key press to the pane. `key` is a crossterm key event;
+/// literal printable chars go through send-keys -l, everything else is
+/// translated to a tmux key-string name (see `key_args`). Keys that do not
+/// map cleanly are silently dropped.
+pub fn send_key(target: &str, key: KeyEvent) -> Result<()> {
+    let Some(args) = key_args(key) else {
+        return Ok(());
+    };
+    let mut full = vec![
+        "send-keys".to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ];
+    full.extend(args);
+    let refs: Vec<&str> = full.iter().map(String::as_str).collect();
+    tmux(&refs)?;
+    Ok(())
+}
+
+/// Translate a crossterm KeyEvent into the trailing arguments for
+/// `tmux send-keys -t <target> <...>`. Returns `None` for keys with no
+/// clean tmux equivalent (spike scope).
+fn key_args(key: KeyEvent) -> Option<Vec<String>> {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+
+    match key.code {
+        KeyCode::Char(' ') if ctrl => {
+            Some(vec![if alt { "C-M-Space" } else { "C-Space" }.to_string()])
+        }
+        KeyCode::Char(c) if !ctrl && !alt => {
+            Some(vec!["-l".to_string(), "--".to_string(), c.to_string()])
+        }
+        KeyCode::Char(c) => {
+            let lower = c.to_ascii_lowercase();
+            Some(vec![modified_name(&lower.to_string(), ctrl, alt)])
+        }
+        KeyCode::Enter => Some(vec![modified_name("Enter", ctrl, alt)]),
+        KeyCode::Backspace => Some(vec![modified_name("BSpace", ctrl, alt)]),
+        KeyCode::Tab => Some(vec![modified_name("Tab", ctrl, alt)]),
+        KeyCode::BackTab => Some(vec![modified_name("BTab", ctrl, alt)]),
+        KeyCode::Esc => Some(vec![modified_name("Escape", ctrl, alt)]),
+        KeyCode::Up => Some(vec![modified_name("Up", ctrl, alt)]),
+        KeyCode::Down => Some(vec![modified_name("Down", ctrl, alt)]),
+        KeyCode::Left => Some(vec![modified_name("Left", ctrl, alt)]),
+        KeyCode::Right => Some(vec![modified_name("Right", ctrl, alt)]),
+        KeyCode::Home => Some(vec![modified_name("Home", ctrl, alt)]),
+        KeyCode::End => Some(vec![modified_name("End", ctrl, alt)]),
+        KeyCode::PageUp => Some(vec![modified_name("PPage", ctrl, alt)]),
+        KeyCode::PageDown => Some(vec![modified_name("NPage", ctrl, alt)]),
+        KeyCode::Delete => Some(vec![modified_name("DC", ctrl, alt)]),
+        KeyCode::Insert => Some(vec![modified_name("IC", ctrl, alt)]),
+        KeyCode::F(n) if (1..=12).contains(&n) => {
+            Some(vec![modified_name(&format!("F{n}"), ctrl, alt)])
+        }
+        _ => None,
+    }
+}
+
+fn modified_name(base: &str, ctrl: bool, alt: bool) -> String {
+    match (ctrl, alt) {
+        (true, true) => format!("C-M-{base}"),
+        (true, false) => format!("C-{base}"),
+        (false, true) => format!("M-{base}"),
+        (false, false) => base.to_string(),
+    }
+}
+
 /// New window in the given session at the given directory. Returns the new
 /// window's target (`session:index`); does not switch or focus anything.
 pub fn new_window(session: &str, dir_of: &str) -> Result<String> {
@@ -171,4 +240,94 @@ pub fn new_window(session: &str, dir_of: &str) -> Result<String> {
         "#{session_name}:#{window_index}",
     ])?;
     Ok(target.trim().to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::key_args;
+    use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn args(code: KeyCode, mods: KeyModifiers) -> Option<Vec<String>> {
+        key_args(KeyEvent::new(code, mods))
+    }
+
+    #[test]
+    fn plain_char() {
+        assert_eq!(
+            args(KeyCode::Char('a'), KeyModifiers::NONE),
+            Some(vec!["-l".to_string(), "--".to_string(), "a".to_string()])
+        );
+    }
+
+    #[test]
+    fn shifted_char_is_literal() {
+        assert_eq!(
+            args(KeyCode::Char('A'), KeyModifiers::SHIFT),
+            Some(vec!["-l".to_string(), "--".to_string(), "A".to_string()])
+        );
+    }
+
+    #[test]
+    fn ctrl_char() {
+        assert_eq!(
+            args(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            Some(vec!["C-c".to_string()])
+        );
+    }
+
+    #[test]
+    fn alt_char() {
+        assert_eq!(
+            args(KeyCode::Char('x'), KeyModifiers::ALT),
+            Some(vec!["M-x".to_string()])
+        );
+    }
+
+    #[test]
+    fn enter() {
+        assert_eq!(
+            args(KeyCode::Enter, KeyModifiers::NONE),
+            Some(vec!["Enter".to_string()])
+        );
+    }
+
+    #[test]
+    fn esc() {
+        assert_eq!(
+            args(KeyCode::Esc, KeyModifiers::NONE),
+            Some(vec!["Escape".to_string()])
+        );
+    }
+
+    #[test]
+    fn up() {
+        assert_eq!(
+            args(KeyCode::Up, KeyModifiers::NONE),
+            Some(vec!["Up".to_string()])
+        );
+    }
+
+    #[test]
+    fn page_down() {
+        assert_eq!(
+            args(KeyCode::PageDown, KeyModifiers::NONE),
+            Some(vec!["NPage".to_string()])
+        );
+    }
+
+    #[test]
+    fn f5() {
+        assert_eq!(
+            args(KeyCode::F(5), KeyModifiers::NONE),
+            Some(vec!["F5".to_string()])
+        );
+    }
+
+    #[test]
+    fn ctrl_up() {
+        assert_eq!(
+            args(KeyCode::Up, KeyModifiers::CONTROL),
+            Some(vec!["C-Up".to_string()])
+        );
+    }
 }

@@ -20,7 +20,7 @@ mod tmux;
 use ansi_to_tui::IntoText;
 use anyhow::Result;
 use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use tmux::{AgentState, Window};
 
 const TICK: Duration = Duration::from_millis(500);
+const FOCUS_TICK: Duration = Duration::from_millis(100);
 
 fn state_style(state: AgentState) -> (char, Style) {
     match state {
@@ -61,6 +62,7 @@ enum Mode {
     Normal,
     Filter,
     Input,
+    Focus,
 }
 
 struct App {
@@ -257,10 +259,15 @@ fn main() -> Result<()> {
 
     ratatui::run(|terminal| -> Result<()> {
         let mut last_tick = Instant::now();
+        let mut last_focus_tick = Instant::now();
         loop {
             terminal.draw(|frame| draw(frame, &mut app))?;
 
-            let timeout = TICK.saturating_sub(last_tick.elapsed());
+            let timeout = if app.mode == Mode::Focus {
+                FOCUS_TICK.saturating_sub(last_focus_tick.elapsed())
+            } else {
+                TICK.saturating_sub(last_tick.elapsed())
+            };
             if event::poll(timeout)?
                 && let Event::Key(key) = event::read()?
             {
@@ -368,6 +375,13 @@ fn main() -> Result<()> {
                             }
                         }
                         KeyCode::Enter => {
+                            if app.selected().is_some() {
+                                app.mode = Mode::Focus;
+                                app.refresh_preview();
+                                last_focus_tick = Instant::now();
+                            }
+                        }
+                        KeyCode::Char('o') => {
                             if inside {
                                 if act_and_maybe_exit(&mut app, tmux::jump) {
                                     return Ok(());
@@ -384,9 +398,27 @@ fn main() -> Result<()> {
                         }
                         _ => {}
                     },
+                    Mode::Focus => {
+                        if key.code == KeyCode::Char('q')
+                            && key.modifiers.contains(KeyModifiers::CONTROL)
+                        {
+                            app.mode = Mode::Normal;
+                        } else if let Some(w) = app.selected().cloned() {
+                            if let Err(e) = tmux::send_key(&w.target, key) {
+                                app.flash = Some(e.to_string());
+                            }
+                            app.refresh_preview();
+                            last_focus_tick = Instant::now();
+                        }
+                    }
                 }
             }
-            if last_tick.elapsed() >= TICK {
+            if app.mode == Mode::Focus {
+                if last_focus_tick.elapsed() >= FOCUS_TICK {
+                    app.refresh_preview();
+                    last_focus_tick = Instant::now();
+                }
+            } else if last_tick.elapsed() >= TICK {
                 app.refresh();
                 last_tick = Instant::now();
             }
@@ -470,16 +502,29 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
-    let title = if app.preview_target.is_empty() {
+    let focus = app.mode == Mode::Focus;
+    let title = if focus {
+        format!(" FOCUS {} - ctrl-q back ", app.preview_target)
+    } else if app.preview_target.is_empty() {
         " preview ".to_string()
     } else {
         format!(" {} ", app.preview_target)
+    };
+    let border_style = if focus {
+        Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
+    } else {
+        Style::new()
     };
     let inner_height = area.height.saturating_sub(2) as usize;
     let total = app.preview.lines.len();
     let scroll = total.saturating_sub(inner_height) as u16;
     let para = Paragraph::new(app.preview.clone())
-        .block(Block::bordered().title(title))
+        .block(
+            Block::bordered()
+                .title(title)
+                .border_style(border_style)
+                .title_style(border_style),
+        )
         .scroll((scroll, 0));
     frame.render_widget(para, area);
 }
@@ -516,19 +561,23 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else if let Some(f) = &app.flash {
                 Line::from(Span::styled(format!(" {f}"), Style::new().fg(Color::Cyan)))
             } else {
-                let enter_hint = if app.inside {
-                    "enter: go"
+                let attach_hint = if app.inside {
+                    "o: go"
                 } else {
-                    "enter: attach (prefix+d back)"
+                    "o: attach (prefix+d back)"
                 };
                 Line::from(Span::styled(
                     format!(
-                        " {enter_hint}   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   q: quit"
+                        " enter: focus   {attach_hint}   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   q: quit"
                     ),
                     Style::new().fg(Color::DarkGray),
                 ))
             }
         }
+        Mode::Focus => Line::from(Span::styled(
+            " focus: keys go to the agent   ctrl-q: back to list",
+            Style::new().fg(Color::Green),
+        )),
     };
     frame.render_widget(Paragraph::new(line), area);
 }
