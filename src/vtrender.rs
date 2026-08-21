@@ -136,6 +136,12 @@ mod tests {
         p
     }
 
+    fn render_to_buf(widget: VtScreen, area: Rect) -> Buffer {
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        buf
+    }
+
     #[test]
     fn plain_colored_char_maps_fg_and_symbol() {
         // SGR 32 = green fg, then 'x'.
@@ -178,8 +184,7 @@ mod tests {
         let parser = parser_from(b"l1\r\nl2\r\nl3\r\nl4", 4, 5);
         let widget = VtScreen::bottom_anchored(parser.screen());
         let area = Rect::new(0, 0, 5, 2);
-        let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
+        let buf = render_to_buf(widget, area);
         assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "l");
         assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "3");
         assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "l");
@@ -191,8 +196,7 @@ mod tests {
         let parser = parser_from(b"l1\r\nl2\r\nl3\r\nl4\x1b[1;1H", 4, 5);
         let widget = VtScreen::bottom_anchored(parser.screen());
         let area = Rect::new(0, 0, 5, 2);
-        let mut buf = Buffer::empty(area);
-        widget.render(area, &mut buf);
+        let buf = render_to_buf(widget, area);
         for x in 0..area.width {
             for y in 0..area.height {
                 let cell = buf.cell((x, y)).unwrap();
