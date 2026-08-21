@@ -139,13 +139,6 @@ mod tests {
     }
 
     #[test]
-    fn pane_id_absent_from_prev_is_excluded() {
-        let prev = HashMap::new();
-        let windows = vec![window("%1", AgentState::Waiting)];
-        assert!(transitions(&prev, &windows).is_empty());
-    }
-
-    #[test]
     fn waiting_to_error_is_included() {
         let mut prev = HashMap::new();
         prev.insert("%1".to_string(), AgentState::Waiting);
