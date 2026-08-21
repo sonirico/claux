@@ -1,9 +1,14 @@
-//! claux: agent fleet dashboard for tmux. Reads the @agent_state /
+//! claux: agent fleet console for tmux. Reads the @agent_state /
 //! @agent_ctx window options that Claude Code hooks maintain and renders a
-//! sorted-by-urgency list with a live pane preview. Enter jumps, x kills.
+//! sorted-by-urgency list with a live pane preview.
 //!
-//! Intended to run inside `tmux display-popup -E claux` but works from any
-//! client attached to the same tmux server.
+//! Two modes of running:
+//!   claux            one-shot picker (for `tmux display-popup`): enter
+//!                    jumps and exits.
+//!   claux --console  persistent console: jumping, spawning windows and
+//!                    sending input leave claux running.
+//!
+//! claux owns no state: if it dies, tmux and the agents are untouched.
 
 mod tmux;
 
@@ -46,22 +51,41 @@ fn state_style(state: AgentState) -> (char, Style) {
     }
 }
 
+#[derive(PartialEq)]
+enum Mode {
+    Normal,
+    Filter,
+    Input,
+}
+
 struct App {
+    all: Vec<Window>,
     windows: Vec<Window>,
     list: ListState,
     preview: Text<'static>,
     preview_target: String,
     error: Option<String>,
+    mode: Mode,
+    filter: String,
+    input: String,
+    flash: Option<String>,
+    console: bool,
 }
 
 impl App {
-    fn new() -> Self {
+    fn new(console: bool) -> Self {
         Self {
+            all: Vec::new(),
             windows: Vec::new(),
             list: ListState::default(),
             preview: Text::default(),
             preview_target: String::new(),
             error: None,
+            mode: Mode::Normal,
+            filter: String::new(),
+            input: String::new(),
+            flash: None,
+            console,
         }
     }
 
@@ -70,11 +94,9 @@ impl App {
     }
 
     fn refresh(&mut self) {
-        // Keep the selection pinned to the same window across re-sorts.
-        let keep = self.selected().map(|w| w.target.clone());
         match tmux::list_windows() {
             Ok(windows) => {
-                self.windows = windows;
+                self.all = windows;
                 self.error = None;
             }
             Err(e) => {
@@ -82,6 +104,24 @@ impl App {
                 return;
             }
         }
+        self.apply_filter();
+    }
+
+    fn apply_filter(&mut self) {
+        // Keep the selection pinned to the same window across re-sorts.
+        let keep = self.selected().map(|w| w.target.clone());
+        let needle = self.filter.to_lowercase();
+        self.windows = self
+            .all
+            .iter()
+            .filter(|w| {
+                needle.is_empty()
+                    || format!("{} {} {} {}", w.target, w.name, w.dir, w.state.label())
+                        .to_lowercase()
+                        .contains(&needle)
+            })
+            .cloned()
+            .collect();
         let idx = keep
             .and_then(|t| self.windows.iter().position(|w| w.target == t))
             .unwrap_or(0);
@@ -129,6 +169,23 @@ impl App {
         self.list.select(Some(next as usize));
         self.refresh_preview();
     }
+
+    fn counts(&self) -> Vec<(AgentState, usize)> {
+        let mut out: Vec<(AgentState, usize)> = Vec::new();
+        for s in [
+            AgentState::Waiting,
+            AgentState::Error,
+            AgentState::Working,
+            AgentState::Compacting,
+            AgentState::Done,
+        ] {
+            let n = self.all.iter().filter(|w| w.state == s).count();
+            if n > 0 {
+                out.push((s, n));
+            }
+        }
+        out
+    }
 }
 
 fn raw_strip(s: &str) -> String {
@@ -149,8 +206,26 @@ fn raw_strip(s: &str) -> String {
     out
 }
 
+/// Returns true when the app should exit (one-shot mode after an action).
+fn act_and_maybe_exit(app: &mut App, act: impl FnOnce(&Window) -> Result<()>) -> bool {
+    let Some(w) = app.selected().cloned() else {
+        return false;
+    };
+    match act(&w) {
+        Ok(()) => {
+            if !app.console {
+                return true;
+            }
+            app.flash = Some(format!("-> {}", w.target));
+        }
+        Err(e) => app.flash = Some(e.to_string()),
+    }
+    false
+}
+
 fn main() -> Result<()> {
-    let mut app = App::new();
+    let console = std::env::args().any(|a| a == "--console");
+    let mut app = App::new(console);
     app.refresh();
 
     ratatui::run(|terminal| -> Result<()> {
@@ -165,36 +240,96 @@ fn main() -> Result<()> {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                    KeyCode::Char('j') | KeyCode::Down => app.select_delta(1),
-                    KeyCode::Char('k') | KeyCode::Up => app.select_delta(-1),
-                    KeyCode::Char('g') | KeyCode::Home => {
-                        if !app.windows.is_empty() {
-                            app.list.select(Some(0));
-                            app.refresh_preview();
+                app.flash = None;
+                match app.mode {
+                    Mode::Filter => match key.code {
+                        KeyCode::Esc => {
+                            app.filter.clear();
+                            app.mode = Mode::Normal;
+                            app.apply_filter();
                         }
-                    }
-                    KeyCode::Char('G') | KeyCode::End => {
-                        if !app.windows.is_empty() {
-                            app.list.select(Some(app.windows.len() - 1));
-                            app.refresh_preview();
+                        KeyCode::Enter => app.mode = Mode::Normal,
+                        KeyCode::Backspace => {
+                            app.filter.pop();
+                            app.apply_filter();
                         }
-                    }
-                    KeyCode::Char('r') => app.refresh(),
-                    KeyCode::Char('x') => {
-                        if let Some(w) = app.selected() {
-                            let _ = tmux::kill(&w.target);
+                        KeyCode::Char(c) => {
+                            app.filter.push(c);
+                            app.apply_filter();
+                        }
+                        _ => {}
+                    },
+                    Mode::Input => match key.code {
+                        KeyCode::Esc => {
+                            app.input.clear();
+                            app.mode = Mode::Normal;
+                        }
+                        KeyCode::Enter => {
+                            let text = std::mem::take(&mut app.input);
+                            app.mode = Mode::Normal;
+                            if let Some(w) = app.selected() {
+                                app.flash = match tmux::send_line(&w.target, &text) {
+                                    Ok(()) => Some(format!("sent to {}", w.target)),
+                                    Err(e) => Some(e.to_string()),
+                                };
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            app.input.pop();
+                        }
+                        KeyCode::Char(c) => app.input.push(c),
+                        _ => {}
+                    },
+                    Mode::Normal => match key.code {
+                        KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                        KeyCode::Char('j') | KeyCode::Down => app.select_delta(1),
+                        KeyCode::Char('k') | KeyCode::Up => app.select_delta(-1),
+                        KeyCode::Char('g') | KeyCode::Home => {
+                            if !app.windows.is_empty() {
+                                app.list.select(Some(0));
+                                app.refresh_preview();
+                            }
+                        }
+                        KeyCode::Char('G') | KeyCode::End => {
+                            if !app.windows.is_empty() {
+                                app.list.select(Some(app.windows.len() - 1));
+                                app.refresh_preview();
+                            }
+                        }
+                        KeyCode::Char('r') => app.refresh(),
+                        KeyCode::Char('/') => app.mode = Mode::Filter,
+                        KeyCode::Char('i') => {
+                            if app.selected().is_some() {
+                                app.mode = Mode::Input;
+                            }
+                        }
+                        KeyCode::Char('x') => {
+                            if let Some(w) = app.selected() {
+                                let _ = tmux::kill(&w.target);
+                                app.refresh();
+                            }
+                        }
+                        KeyCode::Char('R') => {
+                            if let Some(w) = app.selected() {
+                                app.flash = match tmux::send_line(&w.target, "claude --continue") {
+                                    Ok(()) => Some(format!("resuming {}", w.target)),
+                                    Err(e) => Some(e.to_string()),
+                                };
+                            }
+                        }
+                        KeyCode::Char('n') => {
+                            if act_and_maybe_exit(&mut app, |w| {
+                                tmux::new_window(&w.session, &w.target)
+                            }) {
+                                return Ok(());
+                            }
                             app.refresh();
                         }
-                    }
-                    KeyCode::Enter => {
-                        if let Some(w) = app.selected() {
-                            tmux::jump(w)?;
+                        KeyCode::Enter if act_and_maybe_exit(&mut app, tmux::jump) => {
                             return Ok(());
                         }
-                    }
-                    _ => {}
+                        _ => {}
+                    },
                 }
             }
             if last_tick.elapsed() >= TICK {
@@ -207,14 +342,38 @@ fn main() -> Result<()> {
 }
 
 fn draw(frame: &mut Frame, app: &mut App) {
-    let [body, footer] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
+    let [header, body, footer] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
     let [left, right] =
         Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(body);
 
+    draw_header(frame, app, header);
     draw_list(frame, app, left);
     draw_preview(frame, app, right);
     draw_footer(frame, app, footer);
+}
+
+fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
+    let mut spans = vec![Span::styled(
+        " claux ",
+        Style::new().fg(Color::Black).bg(Color::Green),
+    )];
+    for (state, n) in app.counts() {
+        let (icon, style) = state_style(state);
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(format!("{icon} {n}"), style));
+    }
+    if !app.filter.is_empty() {
+        spans.push(Span::styled(
+            format!("   filter: {}", app.filter),
+            Style::new().fg(Color::Cyan),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -245,7 +404,7 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let title = format!(" agents ({}) ", app.windows.len());
+    let title = format!(" agents ({}/{}) ", app.windows.len(), app.all.len());
     let list = List::new(items)
         .block(Block::bordered().title(title))
         .highlight_style(
@@ -272,15 +431,43 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let line = match &app.error {
-        Some(e) => Line::from(Span::styled(
-            format!(" tmux error: {e}"),
-            Style::new().fg(Color::Red),
-        )),
-        None => Line::from(Span::styled(
-            " enter: go   x: kill   r: refresh   j/k: move   q: quit",
-            Style::new().fg(Color::DarkGray),
-        )),
+    let line = match app.mode {
+        Mode::Filter => Line::from(vec![
+            Span::styled(" /", Style::new().fg(Color::Cyan)),
+            Span::raw(app.filter.clone()),
+            Span::styled("_", Style::new().add_modifier(Modifier::SLOW_BLINK)),
+            Span::styled(
+                "   enter: keep   esc: clear",
+                Style::new().fg(Color::DarkGray),
+            ),
+        ]),
+        Mode::Input => Line::from(vec![
+            Span::styled(
+                format!(" send to {}> ", app.preview_target),
+                Style::new().fg(Color::Yellow),
+            ),
+            Span::raw(app.input.clone()),
+            Span::styled("_", Style::new().add_modifier(Modifier::SLOW_BLINK)),
+            Span::styled(
+                "   enter: send   esc: cancel",
+                Style::new().fg(Color::DarkGray),
+            ),
+        ]),
+        Mode::Normal => {
+            if let Some(e) = &app.error {
+                Line::from(Span::styled(
+                    format!(" tmux error: {e}"),
+                    Style::new().fg(Color::Red),
+                ))
+            } else if let Some(f) = &app.flash {
+                Line::from(Span::styled(format!(" {f}"), Style::new().fg(Color::Cyan)))
+            } else {
+                Line::from(Span::styled(
+                    " enter: go   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   q: quit",
+                    Style::new().fg(Color::DarkGray),
+                ))
+            }
+        }
     };
     frame.render_widget(Paragraph::new(line), area);
 }

@@ -19,14 +19,31 @@ cargo install --path .
 
 ## Usage
 
-Bind it to a popup in `.tmux.conf`:
+Two ways to run it:
 
 ```tmux
+# One-shot picker in a popup: enter jumps and closes.
 bind A display-popup -E -w 90% -h 80% "claux"
+
+# Persistent console in its own session: actions leave it running.
+bind C-a if-shell "tmux has-session -t claux 2>/dev/null" \
+  "switch-client -t claux" \
+  "new-session -d -s claux -n console 'claux --console'; switch-client -t claux"
 ```
 
-Keys: enter jumps to the window, x kills it, j/k move, g/G first/last,
-r forces a refresh, q/esc quits. The list auto-refreshes every 500ms.
+Keys: enter jumps to the window, i types a line into the selected agent's
+pane without attaching (empty line = just Enter, to accept a default),
+n opens a new window in the selected window's directory, R sends
+`claude --continue` (resume an agent after a reboot/restore), x kills,
+/ filters, j/k move, g/G first/last, r forces a refresh, q/esc quits.
+The list auto-refreshes every 500ms; the header shows fleet counters.
+
+## Surviving reboots
+
+claux itself has nothing to lose: all state lives in the tmux server.
+Pair it with tmux-resurrect/continuum so sessions, windows and directories
+come back after a reboot, then use R on each restored agent window to
+resume its conversation (`claude --continue`).
 
 ## How state gets there
 

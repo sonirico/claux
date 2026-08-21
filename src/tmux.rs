@@ -112,3 +112,27 @@ pub fn kill(target: &str) -> Result<()> {
     tmux(&["kill-window", "-t", target])?;
     Ok(())
 }
+
+/// Type a line into the window's active pane without attaching: literal
+/// text first, then Enter. Empty text sends just Enter (accept a default).
+pub fn send_line(target: &str, text: &str) -> Result<()> {
+    if !text.is_empty() {
+        tmux(&["send-keys", "-l", "-t", target, text])?;
+    }
+    tmux(&["send-keys", "-t", target, "Enter"])?;
+    Ok(())
+}
+
+/// New window in the given session at the given directory, and focus it.
+pub fn new_window(session: &str, dir_of: &str) -> Result<()> {
+    let dir = tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        dir_of,
+        "#{pane_current_path}",
+    ])?;
+    tmux(&["new-window", "-t", &format!("{session}:"), "-c", dir.trim()])?;
+    tmux(&["switch-client", "-t", session])?;
+    Ok(())
+}
