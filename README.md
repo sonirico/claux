@@ -70,6 +70,14 @@ to the previous capture-pane polling preview and shows a warning in the
 footer; wrapping accuracy in that fallback depends on the preview column
 matching the pane's real width, same as before.
 
+## Notifications
+
+When a window's agent state transitions into waiting, error or done, claux
+fires a best-effort desktop notification (`osascript` on macOS, `notify-send`
+elsewhere). Other transitions (working, compacting, idle) stay silent to
+avoid churn. Pass `--no-notify` to disable notifications entirely. Since the
+fleet poll pauses while in focus mode, no notifications fire during focus.
+
 ## Surviving reboots
 
 claux itself has nothing to lose: all state lives in the tmux server.

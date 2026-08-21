@@ -2,7 +2,6 @@
 //! Delivery is fire-and-forget: spawned processes are never waited on and
 //! every error is ignored, because a dead or misbehaving notifier must
 //! never take down the TUI.
-#![allow(dead_code)]
 
 use crate::tmux::{AgentState, Window};
 use std::collections::HashMap;

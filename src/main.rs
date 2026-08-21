@@ -28,6 +28,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use control::ControlClient;
@@ -117,10 +118,15 @@ struct App {
     /// draw, used to size the control client / vt100 parser on entering
     /// focus and to detect resizes afterwards.
     last_preview_inner: Rect,
+    /// Per-window state as of the last refresh, keyed by `pane_id`, used to
+    /// detect transitions worth a desktop notification.
+    prev_states: HashMap<String, AgentState>,
+    /// Whether desktop notifications are enabled (`--no-notify` disables).
+    notify: bool,
 }
 
 impl App {
-    fn new(console: bool, inside: bool) -> Self {
+    fn new(console: bool, inside: bool, notify: bool) -> Self {
         Self {
             all: Vec::new(),
             windows: Vec::new(),
@@ -142,6 +148,8 @@ impl App {
             pending_focus_size: None,
             control_warning: None,
             last_preview_inner: Rect::default(),
+            prev_states: HashMap::new(),
+            notify,
         }
     }
 
@@ -160,6 +168,19 @@ impl App {
                 return;
             }
         }
+        if self.notify {
+            for (target, name, state) in notify::transitions(&self.prev_states, &self.all) {
+                notify::send(
+                    &format!("claux: {}", state.label()),
+                    &format!("{target}  {name}"),
+                );
+            }
+        }
+        self.prev_states = self
+            .all
+            .iter()
+            .map(|w| (w.pane_id.clone(), w.state))
+            .collect();
         self.apply_filter();
     }
 
@@ -423,7 +444,8 @@ fn suspend_and(
 fn main() -> Result<()> {
     let inside = tmux::inside_tmux();
     let console = std::env::args().any(|a| a == "--console") || !inside;
-    let mut app = App::new(console, inside);
+    let notify = !std::env::args().any(|a| a == "--no-notify");
+    let mut app = App::new(console, inside, notify);
     app.refresh();
 
     ratatui::run(|terminal| -> Result<()> {
