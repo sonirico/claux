@@ -94,3 +94,7 @@ way - claux is agent-agnostic by design.
   instead of the 500ms tick.
 - Send keys to a blocked agent from the list without attaching.
 - Fleet counters and per-window cost/tokens from Claude Code transcripts.
+
+## License
+
+MIT, see [LICENSE](LICENSE).

@@ -2,6 +2,11 @@
 name = "claux"
 version = "0.1.0"
 edition = "2024"
+description = "Agent fleet dashboard for tmux, observes Claude Code agents via tmux window options"
+license = "MIT"
+repository = "https://github.com/sonirico/claux"
+keywords = ["tmux", "tui", "claude", "dashboard"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 ansi-to-tui = "8.0.1"
