@@ -15,7 +15,9 @@
 //!
 //! claux owns no state: if it dies, tmux and the agents are untouched.
 
+mod control;
 mod tmux;
+mod vtrender;
 
 use ansi_to_tui::IntoText;
 use anyhow::Result;
@@ -27,10 +29,20 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
 use std::time::{Duration, Instant};
 
+use control::ControlClient;
 use tmux::{AgentState, Window};
 
 const TICK: Duration = Duration::from_millis(500);
+/// Fallback capture-pane polling cadence, used only while focused on a
+/// window with no live control-mode client (spawn failure, or it died).
 const FOCUS_TICK: Duration = Duration::from_millis(100);
+/// Poll cadence while a control client drives the focus preview. There is
+/// no portable way to make crossterm's blocking key read wake up on mpsc
+/// channel activity, so this short poll doubles as the "wakeup": %output
+/// pushed by the reader thread is drained and rendered within one tick,
+/// which reads as live without a dedicated capture-pane round trip. Well
+/// under the 250ms fallback the spec allows for.
+const FOCUS_WAKE: Duration = Duration::from_millis(30);
 
 fn state_style(state: AgentState) -> (char, Style) {
     match state {
@@ -78,6 +90,32 @@ struct App {
     flash: Option<String>,
     console: bool,
     inside: bool,
+    /// The tmux -C control client backing focus mode, when one is alive.
+    control: Option<ControlClient>,
+    /// Session the control client is currently attached to (via
+    /// `switch-client`), so we know when a newly focused window needs a
+    /// switch before its `%output` will arrive.
+    control_session: Option<String>,
+    /// Pane ID the vt100 parser below is currently seeded for.
+    control_pane: String,
+    /// Terminal emulator fed by the control client's `%output` for the
+    /// focused pane. `None` means focus mode is running the old
+    /// capture-pane polling fallback (no control client, or it died).
+    vt: Option<vt100::Parser>,
+    /// (cols, rows) most recently sent via `refresh-client -C`, to avoid
+    /// resending on every frame when the preview size hasn't changed.
+    control_size: (u16, u16),
+    /// Size the preview panel wants, discovered during the last draw. Read
+    /// back in the main loop (never in `draw`, which stays side-effect
+    /// free) to decide whether to resize the control client.
+    pending_focus_size: Option<(u16, u16)>,
+    /// Set when control mode is unavailable and focus fell back to
+    /// capture-pane polling; shown in the footer.
+    control_warning: Option<String>,
+    /// Inner (border-excluded) area of the preview panel from the last
+    /// draw, used to size the control client / vt100 parser on entering
+    /// focus and to detect resizes afterwards.
+    last_preview_inner: Rect,
 }
 
 impl App {
@@ -95,6 +133,14 @@ impl App {
             flash: None,
             console,
             inside,
+            control: None,
+            control_session: None,
+            control_pane: String::new(),
+            vt: None,
+            control_size: (0, 0),
+            pending_focus_size: None,
+            control_warning: None,
+            last_preview_inner: Rect::default(),
         }
     }
 
@@ -195,6 +241,128 @@ impl App {
         }
         out
     }
+
+    /// Enter focus mode on `w`: make sure a control client is attached to
+    /// its session, seed a vt100 parser from the pane's current screen, and
+    /// size both to the preview panel's last known inner area. Falls back
+    /// to `vt = None` (old capture-pane polling) if the control client
+    /// cannot be readied, with a warning shown in the footer.
+    fn enter_focus(&mut self, w: &Window) {
+        self.control_warning = None;
+        if let Err(e) = self.ensure_control_attached(w) {
+            self.control_warning = Some(format!("control mode unavailable: {e}"));
+            self.vt = None;
+            return;
+        }
+        let (cols, rows) = self.focus_size();
+        self.seed_vt(w, cols, rows);
+        self.control_size = (0, 0); // force the first resize send below
+        self.resize_control_if_needed(cols, rows);
+    }
+
+    /// Spawn the control client if none exists yet, or switch it to `w`'s
+    /// session if it is attached elsewhere. A -C client only receives
+    /// `%output` for panes of whichever session it is attached to.
+    fn ensure_control_attached(&mut self, w: &Window) -> Result<()> {
+        if self.control.is_none() {
+            self.control = Some(control::attach(None, &w.session)?);
+            self.control_session = Some(w.session.clone());
+            return Ok(());
+        }
+        if self.control_session.as_deref() != Some(w.session.as_str()) {
+            let client = self.control.as_mut().expect("checked above");
+            if let Err(e) = client.send(&control::switch_client_cmd(&w.session)) {
+                // The write failed, meaning the client is dead (broken
+                // pipe); drop it so the next attempt spawns a fresh one
+                // instead of repeatedly failing against a corpse.
+                self.control = None;
+                self.control_session = None;
+                return Err(e);
+            }
+            self.control_session = Some(w.session.clone());
+        }
+        Ok(())
+    }
+
+    /// Best-effort size for a not-yet-drawn or newly resized preview panel:
+    /// the last draw's inner area, or a sane default before the first draw.
+    fn focus_size(&self) -> (u16, u16) {
+        let r = self.last_preview_inner;
+        if r.width == 0 || r.height == 0 {
+            (80, 24)
+        } else {
+            (r.width, r.height)
+        }
+    }
+
+    fn seed_vt(&mut self, w: &Window, cols: u16, rows: u16) {
+        let mut parser = vt100::Parser::new(rows, cols, 0);
+        match tmux::capture_screen_raw(&w.target) {
+            Ok(raw) => parser.process(raw.as_bytes()),
+            Err(e) => self.control_warning = Some(e.to_string()),
+        }
+        self.vt = Some(parser);
+        self.control_pane = w.pane_id.clone();
+    }
+
+    /// Resize the control client's window and the vt100 parser to
+    /// (cols, rows), unless we already asked for exactly that size.
+    fn resize_control_if_needed(&mut self, cols: u16, rows: u16) {
+        if (cols, rows) == self.control_size || cols == 0 || rows == 0 {
+            return;
+        }
+        if let Some(client) = self.control.as_mut()
+            && let Err(e) = client.send(&control::refresh_client_size_cmd(cols, rows))
+        {
+            self.control_warning = Some(e.to_string());
+            return;
+        }
+        if let Some(vt) = self.vt.as_mut() {
+            vt.screen_mut().set_size(rows, cols);
+        }
+        self.control_size = (cols, rows);
+    }
+
+    /// Drain whatever the control client's reader thread queued, feeding
+    /// `%output` for the focused pane into the vt100 parser and reacting to
+    /// the notifications focus mode cares about. Returns true if anything
+    /// was applied (used to decide whether a redraw is warranted).
+    fn drain_control(&mut self) -> bool {
+        let Some(client) = self.control.as_ref() else {
+            return false;
+        };
+        let events = client.poll();
+        if events.is_empty() {
+            return false;
+        }
+        let mut applied = false;
+        for ev in events {
+            match ev {
+                control::Event::Output { pane_id, data } if pane_id == self.control_pane => {
+                    if let Some(vt) = self.vt.as_mut() {
+                        vt.process(&data);
+                        applied = true;
+                    }
+                }
+                control::Event::Output { .. } => {}
+                control::Event::Exit(reason) => {
+                    self.control_warning = Some(match reason {
+                        Some(r) => format!("control client exited: {r}"),
+                        None => "control client exited".to_string(),
+                    });
+                    self.control = None;
+                    self.control_session = None;
+                    self.vt = None;
+                    applied = true;
+                }
+                control::Event::CommandError(lines) => {
+                    self.control_warning = Some(lines.join(" / "));
+                }
+                _ => {}
+            }
+        }
+        applied
+    }
 }
 
 fn raw_strip(s: &str) -> String {
@@ -264,7 +432,11 @@ fn main() -> Result<()> {
             terminal.draw(|frame| draw(frame, &mut app))?;
 
             let timeout = if app.mode == Mode::Focus {
-                FOCUS_TICK.saturating_sub(last_focus_tick.elapsed())
+                if app.vt.is_some() {
+                    FOCUS_WAKE
+                } else {
+                    FOCUS_TICK.saturating_sub(last_focus_tick.elapsed())
+                }
             } else {
                 TICK.saturating_sub(last_tick.elapsed())
             };
@@ -375,9 +547,12 @@ fn main() -> Result<()> {
                             }
                         }
                         KeyCode::Enter => {
-                            if app.selected().is_some() {
+                            if let Some(w) = app.selected().cloned() {
                                 app.mode = Mode::Focus;
-                                app.refresh_preview();
+                                app.enter_focus(&w);
+                                if app.vt.is_none() {
+                                    app.refresh_preview();
+                                }
                                 last_focus_tick = Instant::now();
                             }
                         }
@@ -402,25 +577,58 @@ fn main() -> Result<()> {
                         if key.code == KeyCode::Char('q')
                             && key.modifiers.contains(KeyModifiers::CONTROL)
                         {
+                            // Control client (if any) stays alive for reuse;
+                            // only killed on app exit (see ControlClient's Drop).
                             app.mode = Mode::Normal;
                         } else if let Some(w) = app.selected().cloned() {
                             if let Err(e) = tmux::send_key(&w.target, key) {
                                 app.flash = Some(e.to_string());
                             }
-                            app.refresh_preview();
-                            last_focus_tick = Instant::now();
+                            if app.vt.is_none() {
+                                app.refresh_preview();
+                                last_focus_tick = Instant::now();
+                            }
+                            // With a live control client the pane's own
+                            // %output echo of the keystroke is what updates
+                            // the preview - no extra fetch needed here.
                         }
                     }
                 }
             }
             if app.mode == Mode::Focus {
-                if last_focus_tick.elapsed() >= FOCUS_TICK {
+                if app.vt.is_some() {
+                    app.drain_control();
+                    if app.control.as_ref().is_some_and(ControlClient::is_dead) {
+                        app.control_warning =
+                            Some("control client died; falling back to polling".to_string());
+                        app.control = None;
+                        app.control_session = None;
+                        app.vt = None;
+                    }
+                    if let Some((cols, rows)) = app.pending_focus_size {
+                        app.resize_control_if_needed(cols, rows);
+                    }
+                    if app.vt.is_none() {
+                        // Just fell back mid-focus: pick up the old polling
+                        // cadence immediately instead of waiting a full tick.
+                        app.refresh_preview();
+                        last_focus_tick = Instant::now();
+                    }
+                } else if last_focus_tick.elapsed() >= FOCUS_TICK {
                     app.refresh_preview();
                     last_focus_tick = Instant::now();
                 }
-            } else if last_tick.elapsed() >= TICK {
-                app.refresh();
-                last_tick = Instant::now();
+            } else {
+                // Not focused: still drain and discard so a live control
+                // client's mpsc buffer does not grow unbounded while its
+                // pane keeps producing output nobody is watching.
+                if let Some(client) = app.control.as_ref() {
+                    let _ = client.poll();
+                }
+                if last_tick.elapsed() >= TICK {
+                    app.refresh();
+                    last_tick = Instant::now();
+                }
             }
         }
     })?;
@@ -501,7 +709,13 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     frame.render_stateful_widget(list, area, &mut app.list);
 }
 
-fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
+/// Draws the preview panel border, then either the vt100 control-mode
+/// screen (focus mode with a live control client) or the plain scrolled
+/// text preview (normal mode, or focus mode's capture-pane fallback).
+/// Records the panel's inner area on `app` so the main loop can decide,
+/// after this draw, whether the control client needs a `refresh-client -C`
+/// - side effects that talk to tmux stay out of drawing code.
+fn draw_preview(frame: &mut Frame, app: &mut App, area: Rect) {
     let focus = app.mode == Mode::Focus;
     let title = if focus {
         format!(" FOCUS {} - ctrl-q back ", app.preview_target)
@@ -515,18 +729,25 @@ fn draw_preview(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         Style::new()
     };
-    let inner_height = area.height.saturating_sub(2) as usize;
+    let block = Block::bordered()
+        .title(title)
+        .border_style(border_style)
+        .title_style(border_style);
+    let inner = block.inner(area);
+    app.last_preview_inner = inner;
+    app.pending_focus_size = focus.then_some((inner.width, inner.height));
+    frame.render_widget(block, area);
+
+    if focus && let Some(vt) = &app.vt {
+        frame.render_widget(vtrender::VtScreen::new(vt.screen()), inner);
+        return;
+    }
+
+    let inner_height = inner.height as usize;
     let total = app.preview.lines.len();
     let scroll = total.saturating_sub(inner_height) as u16;
-    let para = Paragraph::new(app.preview.clone())
-        .block(
-            Block::bordered()
-                .title(title)
-                .border_style(border_style)
-                .title_style(border_style),
-        )
-        .scroll((scroll, 0));
-    frame.render_widget(para, area);
+    let para = Paragraph::new(app.preview.clone()).scroll((scroll, 0));
+    frame.render_widget(para, inner);
 }
 
 fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
@@ -574,10 +795,19 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 ))
             }
         }
-        Mode::Focus => Line::from(Span::styled(
-            " focus: keys go to the agent   ctrl-q: back to list",
-            Style::new().fg(Color::Green),
-        )),
+        Mode::Focus => {
+            if let Some(w) = &app.control_warning {
+                Line::from(Span::styled(
+                    format!(" {w} (falling back to polling)   ctrl-q: back to list"),
+                    Style::new().fg(Color::Yellow),
+                ))
+            } else {
+                Line::from(Span::styled(
+                    " focus: keys go to the agent (exact rendering)   ctrl-q: back to list",
+                    Style::new().fg(Color::Green),
+                ))
+            }
+        }
     };
     frame.render_widget(Paragraph::new(line), area);
 }

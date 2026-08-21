@@ -46,21 +46,29 @@ a default), n opens a new window in the selected window's directory, R sends
 / filters, j/k move, g/G first/last, r forces a refresh, q/esc quits.
 The list auto-refreshes every 500ms; the header shows fleet counters.
 
-## Focus mode (experimental)
+## Focus mode (control mode)
 
 Enter on a selected window opens focus mode: the preview pane gets a green
 bold border and every key you press (including Esc, Tab, arrows and Ctrl
 combinations) is forwarded straight to that agent's tmux pane via
 `send-keys`, with no `tmux attach` involved. The window list stays visible
-on the left the whole time. Ctrl-q exits focus mode back to the list. While
-focused, the preview polls every 100ms instead of the normal 500ms list
-refresh, so output feels close to live.
+on the left the whole time. Ctrl-q exits focus mode back to the list.
 
-Known limitation: claux does not resize the pane to match the preview's
-width, so if the preview column is narrower or wider than the pane's real
-width, lines you'd expect to wrap may wrap differently (or not at all) in
-the preview. This is accepted for this experimental mode; use o to attach
-for anything that depends on exact wrapping.
+The preview itself is rendered through a `tmux -C` control-mode client (the
+same model iTerm2 uses for `tmux -CC`): on entering focus, claux attaches a
+control client to the window's session, tells tmux to resize the window to
+the preview panel's exact size (`refresh-client -C`), and feeds the pushed
+`%output` bytes into an in-memory terminal emulator (vt100) that is rendered
+cell by cell. Because tmux is resizing the real pane to match the preview
+column, wrapping is always exact, and because updates are pushed instead of
+polled, output feels live with no fixed refresh interval. The control client
+stays alive across ctrl-q so re-entering focus is instant; it is only killed
+when claux exits.
+
+If the control client cannot be started or dies mid-focus, claux falls back
+to the previous capture-pane polling preview and shows a warning in the
+footer; wrapping accuracy in that fallback depends on the preview column
+matching the pane's real width, same as before.
 
 ## Surviving reboots
 

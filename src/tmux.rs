@@ -52,6 +52,10 @@ pub struct Window {
     pub dir: String,
     pub state: AgentState,
     pub ctx: Option<String>,
+    /// The active pane's `%<id>` (e.g. `%3`), stable across resizes and
+    /// renames. Needed to match control-mode `%output %<pane-id>` events to
+    /// the window they belong to.
+    pub pane_id: String,
 }
 
 fn tmux(args: &[&str]) -> Result<String> {
@@ -70,7 +74,7 @@ fn tmux(args: &[&str]) -> Result<String> {
 }
 
 pub fn list_windows() -> Result<Vec<Window>> {
-    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}";
+    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}";
     let out = tmux(&["list-windows", "-a", "-F", fmt])?;
     let mut windows: Vec<Window> = out.lines().filter_map(parse_line).collect();
     windows.sort_by(|a, b| (a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)));
@@ -85,6 +89,7 @@ fn parse_line(line: &str) -> Option<Window> {
     let name = f.next()?.to_string();
     let dir = f.next()?.to_string();
     let ctx = f.next().filter(|s| !s.is_empty()).map(str::to_string);
+    let pane_id = f.next()?.to_string();
     Some(Window {
         target: format!("{session}:{index}"),
         session,
@@ -93,12 +98,23 @@ fn parse_line(line: &str) -> Option<Window> {
         dir,
         state,
         ctx,
+        pane_id,
     })
 }
 
 /// Visible content of the window's active pane, with ANSI colors.
 pub fn capture(target: &str) -> Result<String> {
     tmux(&["capture-pane", "-ep", "-t", target])
+}
+
+/// Snapshot of the pane's current screen (not history), ANSI escapes kept,
+/// joined with \r\n so a `vt100::Parser` treats each captured line as a
+/// fresh line instead of wrapping them into one another. Used to seed the
+/// control-mode parser before applying `%output` deltas, so entering focus
+/// does not show a blank screen until the next keystroke.
+pub fn capture_screen_raw(target: &str) -> Result<String> {
+    let raw = tmux(&["capture-pane", "-e", "-q", "-p", "-t", target])?;
+    Ok(raw.replace('\n', "\r\n"))
 }
 
 /// True when running inside a tmux client (popup, pane, ...).
