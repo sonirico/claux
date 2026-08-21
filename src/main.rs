@@ -77,6 +77,16 @@ enum Mode {
     Filter,
     Input,
     Focus,
+    Mosaic,
+}
+
+/// One cell of the mosaic grid: the window it previews, its live vt100
+/// screen (fed from a shared control client's `%output`), and an error to
+/// show instead when the client or the initial capture failed.
+struct MosaicCell {
+    window: Window,
+    vt: Option<vt100::Parser>,
+    err: Option<String>,
 }
 
 struct App {
@@ -123,6 +133,14 @@ struct App {
     prev_states: HashMap<String, AgentState>,
     /// Whether desktop notifications are enabled (`--no-notify` disables).
     notify: bool,
+    /// Live cells of the mosaic grid, snapshotted from `self.windows` on
+    /// entry and left unaffected by later re-sorts.
+    mosaic_cells: Vec<MosaicCell>,
+    /// One control client per distinct session backing the mosaic cells,
+    /// dropped (and thus killed) on `exit_mosaic`.
+    mosaic_clients: Vec<(String, ControlClient)>,
+    /// Index into `mosaic_cells` of the currently highlighted cell.
+    mosaic_selected: usize,
 }
 
 impl App {
@@ -150,6 +168,9 @@ impl App {
             last_preview_inner: Rect::default(),
             prev_states: HashMap::new(),
             notify,
+            mosaic_cells: Vec::new(),
+            mosaic_clients: Vec::new(),
+            mosaic_selected: 0,
         }
     }
 
@@ -385,6 +406,118 @@ impl App {
         }
         applied
     }
+
+    /// Enter mosaic mode on the 4 most urgent windows: one control client
+    /// per distinct session, one vt100 parser per cell seeded from the
+    /// pane's current screen. Does nothing (stays in Normal) if there are
+    /// no windows to show.
+    fn enter_mosaic(&mut self) {
+        let picked: Vec<Window> = self.windows.iter().take(4).cloned().collect();
+        if picked.is_empty() {
+            return;
+        }
+        let mut cells: Vec<MosaicCell> = picked
+            .iter()
+            .map(|w| MosaicCell {
+                window: w.clone(),
+                vt: None,
+                err: None,
+            })
+            .collect();
+
+        let mut attached: Vec<String> = Vec::new();
+        for w in &picked {
+            if attached.contains(&w.session) {
+                continue;
+            }
+            attached.push(w.session.clone());
+            match control::attach(None, &w.session) {
+                Ok(client) => self.mosaic_clients.push((w.session.clone(), client)),
+                Err(e) => {
+                    let msg = e.to_string();
+                    for cell in cells.iter_mut().filter(|c| c.window.session == w.session) {
+                        cell.err = Some(msg.clone());
+                        cell.vt = None;
+                    }
+                }
+            }
+        }
+
+        for cell in cells.iter_mut() {
+            if cell.err.is_some() {
+                continue;
+            }
+            let mut parser = vt100::Parser::new(cell.window.pane_rows, cell.window.pane_cols, 0);
+            match tmux::capture_screen_raw(&cell.window.target) {
+                Ok(raw) => {
+                    parser.process(raw.as_bytes());
+                    cell.vt = Some(parser);
+                }
+                Err(e) => {
+                    cell.err = Some(e.to_string());
+                    cell.vt = None;
+                }
+            }
+        }
+
+        self.mosaic_cells = cells;
+        self.mosaic_selected = 0;
+    }
+
+    /// Leave mosaic mode: drop every control client (killing its `tmux -C`
+    /// child) and clear the cells.
+    fn exit_mosaic(&mut self) {
+        self.mosaic_cells.clear();
+        self.mosaic_clients.clear();
+        self.mosaic_selected = 0;
+    }
+
+    /// Drain every mosaic control client, routing `%output` to the cell
+    /// whose pane it belongs to and marking a session's cells dead on
+    /// `%exit` or a hung-up client. Returns whether anything was applied.
+    fn drain_mosaic(&mut self) -> bool {
+        let mut applied = false;
+        let mut dead_sessions: Vec<String> = Vec::new();
+        for (session, client) in &self.mosaic_clients {
+            for ev in client.poll() {
+                match ev {
+                    control::Event::Output { pane_id, data } => {
+                        if let Some(cell) = self
+                            .mosaic_cells
+                            .iter_mut()
+                            .find(|c| c.window.pane_id == pane_id)
+                            && let Some(vt) = cell.vt.as_mut()
+                        {
+                            vt.process(&data);
+                            applied = true;
+                        }
+                    }
+                    control::Event::Exit(_) => {
+                        if !dead_sessions.contains(session) {
+                            dead_sessions.push(session.clone());
+                        }
+                        applied = true;
+                    }
+                    _ => {}
+                }
+            }
+            if client.is_dead() && !dead_sessions.contains(session) {
+                dead_sessions.push(session.clone());
+                applied = true;
+            }
+        }
+        for session in &dead_sessions {
+            for cell in self
+                .mosaic_cells
+                .iter_mut()
+                .filter(|c| &c.window.session == session)
+            {
+                cell.err = Some("control client died".to_string());
+                cell.vt = None;
+            }
+        }
+        applied
+    }
 }
 
 fn raw_strip(s: &str) -> String {
@@ -460,6 +593,8 @@ fn main() -> Result<()> {
                 } else {
                     FOCUS_TICK.saturating_sub(last_focus_tick.elapsed())
                 }
+            } else if app.mode == Mode::Mosaic {
+                FOCUS_WAKE
             } else {
                 TICK.saturating_sub(last_tick.elapsed())
             };
@@ -579,6 +714,12 @@ fn main() -> Result<()> {
                                 last_focus_tick = Instant::now();
                             }
                         }
+                        KeyCode::Char('m') => {
+                            app.enter_mosaic();
+                            if !app.mosaic_cells.is_empty() {
+                                app.mode = Mode::Mosaic;
+                            }
+                        }
                         KeyCode::Char('o') => {
                             if inside {
                                 if act_and_maybe_exit(&mut app, tmux::jump) {
@@ -616,6 +757,65 @@ fn main() -> Result<()> {
                             // the preview - no extra fetch needed here.
                         }
                     }
+                    Mode::Mosaic => match key.code {
+                        KeyCode::Char('m') | KeyCode::Char('q') | KeyCode::Esc => {
+                            app.exit_mosaic();
+                            app.mode = Mode::Normal;
+                        }
+                        KeyCode::Char('h') | KeyCode::Left => {
+                            let len = app.mosaic_cells.len();
+                            if len > 0 {
+                                app.mosaic_selected = (app.mosaic_selected as i32 - 1)
+                                    .clamp(0, len as i32 - 1)
+                                    as usize;
+                            }
+                        }
+                        KeyCode::Char('l') | KeyCode::Right => {
+                            let len = app.mosaic_cells.len();
+                            if len > 0 {
+                                app.mosaic_selected = (app.mosaic_selected as i32 + 1)
+                                    .clamp(0, len as i32 - 1)
+                                    as usize;
+                            }
+                        }
+                        KeyCode::Char('j') | KeyCode::Down => {
+                            let len = app.mosaic_cells.len();
+                            if len > 0 {
+                                app.mosaic_selected = (app.mosaic_selected as i32 + 2)
+                                    .clamp(0, len as i32 - 1)
+                                    as usize;
+                            }
+                        }
+                        KeyCode::Char('k') | KeyCode::Up => {
+                            let len = app.mosaic_cells.len();
+                            if len > 0 {
+                                app.mosaic_selected = (app.mosaic_selected as i32 - 2)
+                                    .clamp(0, len as i32 - 1)
+                                    as usize;
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if let Some(window) = app
+                                .mosaic_cells
+                                .get(app.mosaic_selected)
+                                .map(|c| c.window.clone())
+                            {
+                                if let Some(idx) =
+                                    app.windows.iter().position(|w| w.target == window.target)
+                                {
+                                    app.list.select(Some(idx));
+                                }
+                                app.exit_mosaic();
+                                app.mode = Mode::Focus;
+                                app.enter_focus(&window);
+                                if app.vt.is_none() {
+                                    app.refresh_preview();
+                                }
+                                last_focus_tick = Instant::now();
+                            }
+                        }
+                        _ => {}
+                    },
                 }
             }
             if app.mode == Mode::Focus {
@@ -642,6 +842,9 @@ fn main() -> Result<()> {
                     last_focus_tick = Instant::now();
                 }
             } else {
+                if app.mode == Mode::Mosaic {
+                    app.drain_mosaic();
+                }
                 // Not focused: still drain and discard so a live control
                 // client's mpsc buffer does not grow unbounded while its
                 // pane keeps producing output nobody is watching.
@@ -665,13 +868,56 @@ fn draw(frame: &mut Frame, app: &mut App) {
         Constraint::Length(1),
     ])
     .areas(frame.area());
-    let [left, right] =
-        Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)]).areas(body);
-
     draw_header(frame, app, header);
-    draw_list(frame, app, left);
-    draw_preview(frame, app, right);
+    if app.mode == Mode::Mosaic {
+        draw_mosaic(frame, app, body);
+    } else {
+        let [left, right] =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .areas(body);
+        draw_list(frame, app, left);
+        draw_preview(frame, app, right);
+    }
     draw_footer(frame, app, footer);
+}
+
+/// Draws the mosaic grid: a fixed 2x2 split, one bordered block per cell
+/// showing the live vt100 preview (or the cell's error) with the selected
+/// cell's border overridden to green bold.
+fn draw_mosaic(frame: &mut Frame, app: &App, area: Rect) {
+    let [top, bottom] =
+        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
+    let [tl, tr] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(top);
+    let [bl, br] =
+        Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(bottom);
+    let slots = [tl, tr, bl, br];
+
+    for (i, slot) in slots.into_iter().enumerate() {
+        let Some(cell) = app.mosaic_cells.get(i) else {
+            continue;
+        };
+        let (_, state_border) = state_style(cell.window.state);
+        let border_style = if i == app.mosaic_selected {
+            Style::new().fg(Color::Green).add_modifier(Modifier::BOLD)
+        } else {
+            state_border
+        };
+        let title = format!(" {} {} ", cell.window.target, cell.window.state.label());
+        let block = Block::bordered().title(title).border_style(border_style);
+        let inner = block.inner(slot);
+        frame.render_widget(block, slot);
+
+        if let Some(vt) = &cell.vt {
+            frame.render_widget(vtrender::VtScreen::bottom_anchored(vt.screen()), inner);
+        } else {
+            let text = cell.err.as_deref().unwrap_or("no preview");
+            frame.render_widget(
+                Paragraph::new(text.to_string()).style(Style::new().fg(Color::DarkGray)),
+                inner,
+            );
+        }
+    }
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
@@ -812,7 +1058,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 Line::from(Span::styled(
                     format!(
-                        " enter: focus   {attach_hint}   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   q: quit"
+                        " enter: focus   {attach_hint}   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   q: quit   m: mosaic"
                     ),
                     Style::new().fg(Color::DarkGray),
                 ))
@@ -831,6 +1077,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 ))
             }
         }
+        Mode::Mosaic => Line::from(Span::styled(
+            " mosaic: h/j/k/l move   enter: focus   m/esc: back",
+            Style::new().fg(Color::Green),
+        )),
     };
     frame.render_widget(Paragraph::new(line), area);
 }

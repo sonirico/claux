@@ -43,7 +43,8 @@ to the window / attaches (the old enter behavior), i types a line into the
 selected agent's pane without attaching (empty line = just Enter, to accept
 a default), n opens a new window in the selected window's directory, R sends
 `claude --continue` (resume an agent after a reboot/restore), x kills,
-/ filters, j/k move, g/G first/last, r forces a refresh, q/esc quits.
+/ filters, j/k move, g/G first/last, r forces a refresh, q/esc quits,
+m opens mosaic mode (see below).
 The list auto-refreshes every 500ms; the header shows fleet counters.
 
 ## Focus mode (control mode)
@@ -77,6 +78,15 @@ fires a best-effort desktop notification (`osascript` on macOS, `notify-send`
 elsewhere). Other transitions (working, compacting, idle) stay silent to
 avoid churn. Pass `--no-notify` to disable notifications entirely. Since the
 fleet poll pauses while in focus mode, no notifications fire during focus.
+
+## Mosaic mode
+
+`m` opens a live 2x2 grid of the 4 most urgent agents, one `tmux -C` control
+client per session backing the cells. Panes are never resized to fit the
+grid, so a cell crops to the bottom-left corner of the real pane instead of
+rewrapping it. Mosaic is view-only: it never forwards keys to the agents.
+`h`/`j`/`k`/`l` move the selection between cells, enter jumps into focus
+mode on the selected cell, and `m` or esc goes back to the list.
 
 ## Surviving reboots
 
