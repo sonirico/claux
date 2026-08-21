@@ -19,7 +19,14 @@ cargo install --path .
 
 ## Usage
 
-Two ways to run it:
+Run `claux` in any plain terminal outside tmux and it becomes your primary
+console: enter attaches the real tmux client to the selected window in that
+same terminal, so every tmux binding works exactly as normal (it IS tmux).
+prefix+d detaches and drops you straight back into claux with a fresh list;
+if the session dies, claux resumes the same way. Outside tmux claux is
+always persistent, since a one-shot exit would strand you in a dead shell.
+
+Inside tmux, two more ways to run it:
 
 ```tmux
 # One-shot picker in a popup: enter jumps and closes.

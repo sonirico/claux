@@ -2,11 +2,16 @@
 //! @agent_ctx window options that Claude Code hooks maintain and renders a
 //! sorted-by-urgency list with a live pane preview.
 //!
-//! Two modes of running:
-//!   claux            one-shot picker (for `tmux display-popup`): enter
-//!                    jumps and exits.
-//!   claux --console  persistent console: jumping, spawning windows and
-//!                    sending input leave claux running.
+//! Three modes of running:
+//!   claux            inside tmux, one-shot picker (for `tmux display-popup`):
+//!                    enter jumps and exits.
+//!   claux --console  inside tmux, persistent console: jumping, spawning
+//!                    windows and sending input leave claux running.
+//!   claux            outside tmux, primary console (always persistent):
+//!                    enter suspends the TUI and attaches a real tmux client
+//!                    to the window in this same terminal; detaching
+//!                    (prefix+d) or the session dying returns to claux with
+//!                    a fresh list.
 //!
 //! claux owns no state: if it dies, tmux and the agents are untouched.
 
@@ -70,10 +75,11 @@ struct App {
     input: String,
     flash: Option<String>,
     console: bool,
+    inside: bool,
 }
 
 impl App {
-    fn new(console: bool) -> Self {
+    fn new(console: bool, inside: bool) -> Self {
         Self {
             all: Vec::new(),
             windows: Vec::new(),
@@ -86,6 +92,7 @@ impl App {
             input: String::new(),
             flash: None,
             console,
+            inside,
         }
     }
 
@@ -223,9 +230,29 @@ fn act_and_maybe_exit(app: &mut App, act: impl FnOnce(&Window) -> Result<()>) ->
     false
 }
 
+/// Suspend the TUI (leave raw mode / alternate screen), run `f` with the
+/// terminal released, then restore the TUI. Used to hand the real terminal
+/// to `tmux attach-session` and get it back when the client detaches.
+fn suspend_and(
+    terminal: &mut ratatui::DefaultTerminal,
+    f: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    use ratatui::crossterm::terminal::{
+        EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    };
+    disable_raw_mode()?;
+    ratatui::crossterm::execute!(std::io::stdout(), LeaveAlternateScreen)?;
+    let res = f();
+    ratatui::crossterm::execute!(std::io::stdout(), EnterAlternateScreen)?;
+    enable_raw_mode()?;
+    terminal.clear()?;
+    res
+}
+
 fn main() -> Result<()> {
-    let console = std::env::args().any(|a| a == "--console");
-    let mut app = App::new(console);
+    let inside = tmux::inside_tmux();
+    let console = std::env::args().any(|a| a == "--console") || !inside;
+    let mut app = App::new(console, inside);
     app.refresh();
 
     ratatui::run(|terminal| -> Result<()> {
@@ -318,15 +345,42 @@ fn main() -> Result<()> {
                             }
                         }
                         KeyCode::Char('n') => {
-                            if act_and_maybe_exit(&mut app, |w| {
-                                tmux::new_window(&w.session, &w.target)
-                            }) {
-                                return Ok(());
+                            if let Some(w) = app.selected().cloned() {
+                                match tmux::new_window(&w.session, &w.target) {
+                                    Ok(target) => {
+                                        if inside {
+                                            if let Err(e) = tmux::switch(&w.session) {
+                                                app.flash = Some(e.to_string());
+                                            } else if !app.console {
+                                                return Ok(());
+                                            } else {
+                                                app.flash = Some(format!("-> {target}"));
+                                            }
+                                        } else if let Err(e) = suspend_and(terminal, || {
+                                            tmux::attach(&w.session, &target)
+                                        }) {
+                                            app.flash = Some(e.to_string());
+                                        }
+                                        app.refresh();
+                                    }
+                                    Err(e) => app.flash = Some(e.to_string()),
+                                }
                             }
-                            app.refresh();
                         }
-                        KeyCode::Enter if act_and_maybe_exit(&mut app, tmux::jump) => {
-                            return Ok(());
+                        KeyCode::Enter => {
+                            if inside {
+                                if act_and_maybe_exit(&mut app, tmux::jump) {
+                                    return Ok(());
+                                }
+                            } else if let Some(w) = app.selected().cloned() {
+                                if let Err(e) =
+                                    suspend_and(terminal, || tmux::attach(&w.session, &w.target))
+                                {
+                                    app.flash = Some(e.to_string());
+                                }
+                                app.refresh();
+                                last_tick = Instant::now();
+                            }
                         }
                         _ => {}
                     },
@@ -462,8 +516,15 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
             } else if let Some(f) = &app.flash {
                 Line::from(Span::styled(format!(" {f}"), Style::new().fg(Color::Cyan)))
             } else {
+                let enter_hint = if app.inside {
+                    "enter: go"
+                } else {
+                    "enter: attach (prefix+d back)"
+                };
                 Line::from(Span::styled(
-                    " enter: go   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   q: quit",
+                    format!(
+                        " {enter_hint}   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   q: quit"
+                    ),
                     Style::new().fg(Color::DarkGray),
                 ))
             }

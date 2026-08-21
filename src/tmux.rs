@@ -100,11 +100,38 @@ pub fn capture(target: &str) -> Result<String> {
     tmux(&["capture-pane", "-ep", "-t", target])
 }
 
+/// True when running inside a tmux client (popup, pane, ...).
+pub fn inside_tmux() -> bool {
+    std::env::var_os("TMUX").is_some()
+}
+
 /// Switch the attached client to the window. Works from inside a popup:
 /// switch-client retargets the client the popup belongs to.
 pub fn jump(window: &Window) -> Result<()> {
     tmux(&["switch-client", "-t", &window.session])?;
     tmux(&["select-window", "-t", &window.target])?;
+    Ok(())
+}
+
+/// Retarget the attached client to a session (inside tmux only).
+pub fn switch(session: &str) -> Result<()> {
+    tmux(&["switch-client", "-t", session])?;
+    Ok(())
+}
+
+/// Attach this terminal to the window and BLOCK until the client detaches
+/// (prefix+d) or the session dies. For running claux outside tmux: the
+/// caller must have released the terminal (raw mode, alternate screen)
+/// before calling, and restores it after.
+pub fn attach(session: &str, target: &str) -> Result<()> {
+    tmux(&["select-window", "-t", target])?;
+    let status = Command::new("tmux")
+        .args(["attach-session", "-t", session])
+        .status()
+        .context("failed to spawn tmux attach")?;
+    if !status.success() {
+        bail!("tmux attach-session -t {session} exited with {status}");
+    }
     Ok(())
 }
 
@@ -123,8 +150,9 @@ pub fn send_line(target: &str, text: &str) -> Result<()> {
     Ok(())
 }
 
-/// New window in the given session at the given directory, and focus it.
-pub fn new_window(session: &str, dir_of: &str) -> Result<()> {
+/// New window in the given session at the given directory. Returns the new
+/// window's target (`session:index`); does not switch or focus anything.
+pub fn new_window(session: &str, dir_of: &str) -> Result<String> {
     let dir = tmux(&[
         "display-message",
         "-p",
@@ -132,7 +160,15 @@ pub fn new_window(session: &str, dir_of: &str) -> Result<()> {
         dir_of,
         "#{pane_current_path}",
     ])?;
-    tmux(&["new-window", "-t", &format!("{session}:"), "-c", dir.trim()])?;
-    tmux(&["switch-client", "-t", session])?;
-    Ok(())
+    let target = tmux(&[
+        "new-window",
+        "-t",
+        &format!("{session}:"),
+        "-c",
+        dir.trim(),
+        "-P",
+        "-F",
+        "#{session_name}:#{window_index}",
+    ])?;
+    Ok(target.trim().to_string())
 }
