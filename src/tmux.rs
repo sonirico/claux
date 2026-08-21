@@ -56,6 +56,12 @@ pub struct Window {
     /// renames. Needed to match control-mode `%output %<pane-id>` events to
     /// the window they belong to.
     pub pane_id: String,
+    /// Real size of the active pane, used by mosaic cells to size their
+    /// vt100 parser (the mosaic never resizes real panes)
+    pub pane_cols: u16,
+    /// Real size of the active pane, used by mosaic cells to size their
+    /// vt100 parser (the mosaic never resizes real panes)
+    pub pane_rows: u16,
 }
 
 fn tmux(args: &[&str]) -> Result<String> {
@@ -74,7 +80,7 @@ fn tmux(args: &[&str]) -> Result<String> {
 }
 
 pub fn list_windows() -> Result<Vec<Window>> {
-    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}";
+    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}";
     let out = tmux(&["list-windows", "-a", "-F", fmt])?;
     let mut windows: Vec<Window> = out.lines().filter_map(parse_line).collect();
     windows.sort_by(|a, b| (a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)));
@@ -90,6 +96,8 @@ fn parse_line(line: &str) -> Option<Window> {
     let dir = f.next()?.to_string();
     let ctx = f.next().filter(|s| !s.is_empty()).map(str::to_string);
     let pane_id = f.next()?.to_string();
+    let pane_cols: u16 = f.next()?.parse().ok()?;
+    let pane_rows: u16 = f.next()?.parse().ok()?;
     Some(Window {
         target: format!("{session}:{index}"),
         session,
@@ -99,6 +107,8 @@ fn parse_line(line: &str) -> Option<Window> {
         state,
         ctx,
         pane_id,
+        pane_cols,
+        pane_rows,
     })
 }
 
@@ -260,7 +270,7 @@ pub fn new_window(session: &str, dir_of: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::key_args;
+    use super::{key_args, parse_line};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn args(code: KeyCode, mods: KeyModifiers) -> Option<Vec<String>> {
@@ -345,5 +355,21 @@ mod tests {
             args(KeyCode::Up, KeyModifiers::CONTROL),
             Some(vec!["C-Up".to_string()])
         );
+    }
+
+    #[test]
+    fn parse_line_full_fields() {
+        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24";
+        let window = parse_line(line).unwrap();
+        assert_eq!(window.target, "sess:0");
+        assert_eq!(window.pane_id, "%3");
+        assert_eq!(window.pane_cols, 80);
+        assert_eq!(window.pane_rows, 24);
+    }
+
+    #[test]
+    fn parse_line_bad_size_is_none() {
+        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\tnotanumber\t24";
+        assert!(parse_line(line).is_none());
     }
 }

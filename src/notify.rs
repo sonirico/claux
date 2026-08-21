@@ -101,6 +101,8 @@ mod tests {
             state,
             ctx: None,
             pane_id: pane_id.to_string(),
+            pane_cols: 80,
+            pane_rows: 24,
         }
     }
 

@@ -53,21 +53,41 @@ fn cell_style(cell: &vt100::Cell) -> Style {
 /// draw call from a reference to the parser's current screen; owns nothing.
 pub struct VtScreen<'a> {
     screen: &'a vt100::Screen,
+    bottom: bool,
 }
 
 impl<'a> VtScreen<'a> {
     pub fn new(screen: &'a vt100::Screen) -> Self {
-        Self { screen }
+        Self {
+            screen,
+            bottom: false,
+        }
+    }
+
+    /// Like `new`, but when the screen has more rows than the render area,
+    /// skips the topmost `rows - area.height` screen rows so the bottom rows
+    /// fill the area instead.
+    pub fn bottom_anchored(screen: &'a vt100::Screen) -> Self {
+        Self {
+            screen,
+            bottom: true,
+        }
     }
 }
 
 impl Widget for VtScreen<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let (rows, cols) = self.screen.size();
-        for row in 0..rows {
-            if row >= area.height {
+        let row_off = if self.bottom {
+            rows.saturating_sub(area.height)
+        } else {
+            0
+        };
+        for r in 0..(rows - row_off) {
+            if r >= area.height {
                 break;
             }
+            let row = row_off + r;
             for col in 0..cols {
                 if col >= area.width {
                     break;
@@ -75,7 +95,7 @@ impl Widget for VtScreen<'_> {
                 let Some(cell) = self.screen.cell(row, col) else {
                     continue;
                 };
-                let pos = Position::new(area.x + col, area.y + row);
+                let pos = Position::new(area.x + col, area.y + r);
                 let Some(buf_cell) = buf.cell_mut(pos) else {
                     continue;
                 };
@@ -95,8 +115,8 @@ impl Widget for VtScreen<'_> {
         }
         if !self.screen.hide_cursor() {
             let (crow, ccol) = self.screen.cursor_position();
-            if crow < area.height && ccol < area.width {
-                let pos = Position::new(area.x + ccol, area.y + crow);
+            if crow >= row_off && crow - row_off < area.height && ccol < area.width {
+                let pos = Position::new(area.x + ccol, area.y + (crow - row_off));
                 if let Some(buf_cell) = buf.cell_mut(pos) {
                     buf_cell.set_style(buf_cell.style().add_modifier(Modifier::REVERSED));
                 }
@@ -151,6 +171,34 @@ mod tests {
                 .add_modifier
                 .contains(Modifier::REVERSED)
         );
+    }
+
+    #[test]
+    fn bottom_anchored_shows_last_rows() {
+        let parser = parser_from(b"l1\r\nl2\r\nl3\r\nl4", 4, 5);
+        let widget = VtScreen::bottom_anchored(parser.screen());
+        let area = Rect::new(0, 0, 5, 2);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        assert_eq!(buf.cell((0, 0)).unwrap().symbol(), "l");
+        assert_eq!(buf.cell((1, 0)).unwrap().symbol(), "3");
+        assert_eq!(buf.cell((0, 1)).unwrap().symbol(), "l");
+        assert_eq!(buf.cell((1, 1)).unwrap().symbol(), "4");
+    }
+
+    #[test]
+    fn bottom_anchored_cursor_outside_window_not_drawn() {
+        let parser = parser_from(b"l1\r\nl2\r\nl3\r\nl4\x1b[1;1H", 4, 5);
+        let widget = VtScreen::bottom_anchored(parser.screen());
+        let area = Rect::new(0, 0, 5, 2);
+        let mut buf = Buffer::empty(area);
+        widget.render(area, &mut buf);
+        for x in 0..area.width {
+            for y in 0..area.height {
+                let cell = buf.cell((x, y)).unwrap();
+                assert!(!cell.style().add_modifier.contains(Modifier::REVERSED));
+            }
+        }
     }
 
     #[test]
