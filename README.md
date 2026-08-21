@@ -1,0 +1,47 @@
+# claux
+
+Agent fleet dashboard for tmux (claude + tmux).
+
+claux renders every window in every session of your tmux server, sorted by
+urgency, with a live preview of the selected window's pane. It is a pure
+OBSERVER: the state comes from the `@agent_state` and `@agent_ctx` window
+options that Claude Code lifecycle hooks maintain, so there is no terminal
+scraping, no heuristics, and nothing to lose if claux dies - tmux remains the
+single source of truth.
+
+States, most urgent first: waiting, error, working, compacting, done, idle.
+
+## Install
+
+```sh
+cargo install --path .
+```
+
+## Usage
+
+Bind it to a popup in `.tmux.conf`:
+
+```tmux
+bind A display-popup -E -w 90% -h 80% "claux"
+```
+
+Keys: enter jumps to the window, x kills it, j/k move, g/G first/last,
+r forces a refresh, q/esc quits. The list auto-refreshes every 500ms.
+
+## How state gets there
+
+Claude Code hooks (settings.json) write tmux window options, e.g.:
+
+```json
+{ "command": "[ -n \"$TMUX_PANE\" ] && tmux set-window-option -t \"$TMUX_PANE\" @agent_state working" }
+```
+
+Any agent or script that sets `@agent_state` on its window shows up the same
+way - claux is agent-agnostic by design.
+
+## Roadmap
+
+- Push updates via tmux control mode subscriptions (`refresh-client -B`)
+  instead of the 500ms tick.
+- Send keys to a blocked agent from the list without attaching.
+- Fleet counters and per-window cost/tokens from Claude Code transcripts.
