@@ -104,6 +104,7 @@ mod tests {
             pane_cols: 80,
             pane_rows: 24,
             transcript: None,
+            activity: 0,
         }
     }
 

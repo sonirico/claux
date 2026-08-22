@@ -65,6 +65,10 @@ pub struct Window {
     /// Path to the Claude Code transcript backing this window, published by
     /// the hook-owned `@agent_transcript` window option; `None` when unset.
     pub transcript: Option<String>,
+    /// Epoch seconds of the window's last activity (tmux #{window_activity});
+    /// 0 when unavailable. Used for stuck detection: a working agent whose
+    /// pane has been silent too long.
+    pub activity: u64,
 }
 
 fn tmux(args: &[&str]) -> Result<String> {
@@ -83,7 +87,7 @@ fn tmux(args: &[&str]) -> Result<String> {
 }
 
 pub fn list_windows() -> Result<Vec<Window>> {
-    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}";
+    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}";
     let out = tmux(&["list-windows", "-a", "-F", fmt])?;
     let mut windows: Vec<Window> = out.lines().filter_map(parse_line).collect();
     windows.sort_by(|a, b| (a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)));
@@ -102,6 +106,7 @@ fn parse_line(line: &str) -> Option<Window> {
     let pane_cols: u16 = f.next()?.parse().ok()?;
     let pane_rows: u16 = f.next()?.parse().ok()?;
     let transcript = f.next().filter(|s| !s.is_empty()).map(str::to_string);
+    let activity: u64 = f.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     Some(Window {
         target: format!("{session}:{index}"),
         session,
@@ -114,6 +119,7 @@ fn parse_line(line: &str) -> Option<Window> {
         pane_cols,
         pane_rows,
         transcript,
+        activity,
     })
 }
 
@@ -364,18 +370,27 @@ mod tests {
 
     #[test]
     fn parse_line_full_fields() {
-        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl";
+        let line =
+            "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl\t1700000000";
         let window = parse_line(line).unwrap();
         assert_eq!(window.target, "sess:0");
         assert_eq!(window.pane_id, "%3");
         assert_eq!(window.pane_cols, 80);
         assert_eq!(window.pane_rows, 24);
         assert_eq!(window.transcript, Some("/tmp/transcript.jsonl".to_string()));
+        assert_eq!(window.activity, 1700000000);
+    }
+
+    #[test]
+    fn parse_line_missing_activity_is_zero() {
+        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl";
+        let window = parse_line(line).unwrap();
+        assert_eq!(window.activity, 0);
     }
 
     #[test]
     fn parse_line_bad_size_is_none() {
-        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\tnotanumber\t24\t/tmp/transcript.jsonl";
+        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\tnotanumber\t24\t/tmp/transcript.jsonl\t1700000000";
         assert!(parse_line(line).is_none());
     }
 }

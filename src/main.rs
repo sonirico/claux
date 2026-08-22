@@ -18,6 +18,7 @@
 mod control;
 mod cost;
 mod notify;
+mod timeline;
 mod tmux;
 mod vtrender;
 
