@@ -1,13 +1,18 @@
 # claux
 
-Agent fleet dashboard for tmux (claude + tmux).
+A tmux frontend for agentic coding workflows (claude + tmux).
 
-claux renders every window in every session of your tmux server, sorted by
-urgency, with a live preview of the selected window's pane. It is a pure
-OBSERVER: the state comes from the `@agent_state` and `@agent_ctx` window
-options that Claude Code lifecycle hooks maintain, so there is no terminal
-scraping, no heuristics, and nothing to lose if claux dies - tmux remains the
-single source of truth.
+The premise: your agents are just tmux windows. You open a window, run your
+agent in it (Claude Code or anything else), move on to the next one. claux
+is the console on top of that: it renders every window in every session of
+your tmux server, sorted by urgency, with a live preview of the selected
+window's pane, a focus mode that drives an agent without attaching, and
+per-agent cost tracking.
+
+claux is a pure OBSERVER: the state comes from the `@agent_state` and
+`@agent_ctx` window options that Claude Code lifecycle hooks maintain, so
+there is no terminal scraping, no heuristics, and nothing to lose if claux
+dies - tmux remains the single source of truth.
 
 States, most urgent first: waiting, error, working, compacting, done, idle.
 
@@ -22,6 +27,23 @@ States, most urgent first: waiting, error, working, compacting, done, idle.
 ```sh
 cargo install --path .
 ```
+
+## Quickstart
+
+claux needs nothing beyond tmux and the state hooks: no custom scripts, no
+special tmux config.
+
+1. Merge the `hooks` object from
+   [contrib/claude-code/settings-hooks.json](contrib/claude-code/settings-hooks.json)
+   into your `~/.claude/settings.json`. Optionally install
+   [contrib/claude-code/statusline.sh](contrib/claude-code/statusline.sh)
+   too, for the context-percentage column.
+2. Open tmux windows and run `claude` in them, as many as you like.
+3. Run `claux` in a terminal outside tmux (or see Usage for in-tmux ways).
+
+How you create the windows is your business: by hand, from scripts, one git
+worktree per agent, whatever. claux only reads what tmux already knows, so
+any workflow that ends in "an agent running in a tmux window" works.
 
 ## Usage
 
