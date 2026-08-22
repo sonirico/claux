@@ -11,6 +11,12 @@ single source of truth.
 
 States, most urgent first: waiting, error, working, compacting, done, idle.
 
+![claux demo](docs/demo.gif)
+
+| Agent list | Focus mode |
+|---|---|
+| ![list view](docs/list.png) | ![focus view](docs/focus.png) |
+
 ## Install
 
 ```sh
@@ -118,16 +124,30 @@ Pair it with tmux-resurrect/continuum so sessions, windows and directories
 come back after a reboot, then use R on each restored agent window to
 resume its conversation (`claude --continue`).
 
-## How state gets there
+## How state gets there (wiring it up)
 
-Claude Code hooks (settings.json) write tmux window options, e.g.:
+claux draws nothing by itself: something has to publish state into three
+tmux window options. The protocol is tiny and agent-agnostic:
 
-```json
-{ "command": "[ -n \"$TMUX_PANE\" ] && tmux set-window-option -t \"$TMUX_PANE\" @agent_state working" }
-```
+- `@agent_state`: one of `working`, `waiting`, `error`, `done`,
+  `compacting`, `idle`. Windows without it are ignored.
+- `@agent_ctx` (optional): used-context percentage, an integer like `42`.
+- `@agent_transcript` (optional): path to a Claude Code transcript JSONL,
+  enables the cost column.
 
-Any agent or script that sets `@agent_state` on its window shows up the same
-way - claux is agent-agnostic by design.
+For Claude Code, [contrib/claude-code](contrib/claude-code) has a
+ready-made setup:
+
+- `settings-hooks.json`: lifecycle hooks that keep `@agent_state` and
+  `@agent_transcript` current. Merge the `hooks` object into your
+  `~/.claude/settings.json`.
+- `statusline.sh`: a statusLine command that also publishes `@agent_ctx`.
+  Copy it anywhere, `chmod +x` it, and reference it from settings.
+
+Every hook no-ops outside tmux (`[ -n "$TMUX_PANE" ]`), so the same config
+is safe in plain terminals. Any other agent or script that sets
+`@agent_state` on its window shows up the same way - claux does not know
+what Claude Code is.
 
 ## Roadmap
 
