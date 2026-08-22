@@ -3,8 +3,6 @@
 //! Parsing is incremental by byte offset per transcript path, so refreshing
 //! the cost on a multi-MB transcript only re-reads and re-parses the bytes
 //! appended since the previous call.
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};

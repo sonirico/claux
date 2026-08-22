@@ -62,6 +62,9 @@ pub struct Window {
     /// Real size of the active pane, used by mosaic cells to size their
     /// vt100 parser (the mosaic never resizes real panes)
     pub pane_rows: u16,
+    /// Path to the Claude Code transcript backing this window, published by
+    /// the hook-owned `@agent_transcript` window option; `None` when unset.
+    pub transcript: Option<String>,
 }
 
 fn tmux(args: &[&str]) -> Result<String> {
@@ -80,7 +83,7 @@ fn tmux(args: &[&str]) -> Result<String> {
 }
 
 pub fn list_windows() -> Result<Vec<Window>> {
-    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}";
+    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}";
     let out = tmux(&["list-windows", "-a", "-F", fmt])?;
     let mut windows: Vec<Window> = out.lines().filter_map(parse_line).collect();
     windows.sort_by(|a, b| (a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)));
@@ -98,6 +101,7 @@ fn parse_line(line: &str) -> Option<Window> {
     let pane_id = f.next()?.to_string();
     let pane_cols: u16 = f.next()?.parse().ok()?;
     let pane_rows: u16 = f.next()?.parse().ok()?;
+    let transcript = f.next().filter(|s| !s.is_empty()).map(str::to_string);
     Some(Window {
         target: format!("{session}:{index}"),
         session,
@@ -109,6 +113,7 @@ fn parse_line(line: &str) -> Option<Window> {
         pane_id,
         pane_cols,
         pane_rows,
+        transcript,
     })
 }
 
@@ -359,17 +364,18 @@ mod tests {
 
     #[test]
     fn parse_line_full_fields() {
-        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24";
+        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl";
         let window = parse_line(line).unwrap();
         assert_eq!(window.target, "sess:0");
         assert_eq!(window.pane_id, "%3");
         assert_eq!(window.pane_cols, 80);
         assert_eq!(window.pane_rows, 24);
+        assert_eq!(window.transcript, Some("/tmp/transcript.jsonl".to_string()));
     }
 
     #[test]
     fn parse_line_bad_size_is_none() {
-        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\tnotanumber\t24";
+        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\tnotanumber\t24\t/tmp/transcript.jsonl";
         assert!(parse_line(line).is_none());
     }
 }

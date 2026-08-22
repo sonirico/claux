@@ -45,7 +45,10 @@ a default), n opens a new window in the selected window's directory, R sends
 `claude --continue` (resume an agent after a reboot/restore), x kills,
 / filters, j/k move, g/G first/last, r forces a refresh, q/esc quits,
 m opens mosaic mode (see below).
-The list auto-refreshes every 500ms; the header shows fleet counters.
+The list auto-refreshes every 500ms; the header shows fleet counters and,
+when any window reports a transcript, a fleet-wide cost total. Each row
+shows its own accumulated USD cost next to the context percentage, when
+available (see Cost tracking below).
 
 ## Focus mode (control mode)
 
@@ -87,6 +90,15 @@ grid, so a cell crops to the bottom-left corner of the real pane instead of
 rewrapping it. Mosaic is view-only: it never forwards keys to the agents.
 `h`/`j`/`k`/`l` move the selection between cells, enter jumps into focus
 mode on the selected cell, and `m` or esc goes back to the list.
+
+## Cost tracking
+
+Claude Code hooks publish each session's transcript path as the
+`@agent_transcript` window option. When it is set, claux parses that
+transcript incrementally and shows the accumulated USD cost per agent in the
+list, plus a fleet total in the header. Figures are approximations computed
+at standard first-party API rates from the transcript's own usage blocks.
+Windows without the option simply show no cost.
 
 ## Surviving reboots
 

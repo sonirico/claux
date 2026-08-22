@@ -142,6 +142,10 @@ struct App {
     mosaic_clients: Vec<(String, ControlClient)>,
     /// Index into `mosaic_cells` of the currently highlighted cell.
     mosaic_selected: usize,
+    /// Incremental USD cost parser, keyed internally by transcript path.
+    cost: cost::CostTracker,
+    /// Latest accumulated USD cost per window, keyed by window target.
+    costs: HashMap<String, f64>,
 }
 
 impl App {
@@ -172,6 +176,8 @@ impl App {
             mosaic_cells: Vec::new(),
             mosaic_clients: Vec::new(),
             mosaic_selected: 0,
+            cost: cost::CostTracker::new(),
+            costs: HashMap::new(),
         }
     }
 
@@ -202,6 +208,16 @@ impl App {
             .all
             .iter()
             .map(|w| (w.pane_id.clone(), w.state))
+            .collect();
+        let cost = &mut self.cost;
+        self.costs = self
+            .all
+            .iter()
+            .filter_map(|w| {
+                let path = w.transcript.as_ref()?;
+                let usd = cost.cost_for(path)?;
+                Some((w.target.clone(), usd))
+            })
             .collect();
         self.apply_filter();
     }
@@ -931,6 +947,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(format!("{icon} {n}"), style));
     }
+    let total: f64 = app.costs.values().sum();
+    if total > 0.0 {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("${total:.2}"),
+            Style::new().fg(Color::DarkGray),
+        ));
+    }
     if !app.filter.is_empty() {
         spans.push(Span::styled(
             format!("   filter: {}", app.filter),
@@ -958,6 +982,14 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 ));
             } else {
                 spans.push(Span::raw("     "));
+            }
+            if let Some(c) = app.costs.get(&w.target) {
+                spans.push(Span::styled(
+                    format!("{:>8} ", format!("${c:.2}")),
+                    Style::new().fg(Color::DarkGray),
+                ));
+            } else {
+                spans.push(Span::raw(" ".repeat(9)));
             }
             spans.push(Span::raw(w.name.clone()));
             spans.push(Span::styled(
