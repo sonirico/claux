@@ -16,6 +16,7 @@
 //! claux owns no state: if it dies, tmux and the agents are untouched.
 
 mod control;
+mod cost;
 mod notify;
 mod tmux;
 mod vtrender;
