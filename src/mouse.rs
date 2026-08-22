@@ -65,17 +65,32 @@ mod tests {
     }
 
     #[test]
-    fn list_row_at_border_is_none() {
+    fn list_row_at_top_border_is_none() {
         let a = area();
         assert_eq!(list_row_at(a, 0, a.x + 1, a.y, 100), None);
+    }
+
+    #[test]
+    fn list_row_at_bottom_border_is_none() {
+        let a = area();
         assert_eq!(list_row_at(a, 0, a.x + 1, a.y + a.height - 1, 100), None);
     }
 
     #[test]
-    fn list_row_at_outside_x_is_none() {
+    fn list_row_at_left_of_area_is_none() {
         let a = area();
         assert_eq!(list_row_at(a, 0, a.x, a.y + 1, 100), None);
+    }
+
+    #[test]
+    fn list_row_at_right_of_area_is_none() {
+        let a = area();
         assert_eq!(list_row_at(a, 0, a.x + a.width - 1, a.y + 1, 100), None);
+    }
+
+    #[test]
+    fn list_row_at_far_outside_x_is_none() {
+        let a = area();
         assert_eq!(list_row_at(a, 0, a.x + a.width + 10, a.y + 1, 100), None);
     }
 
@@ -86,107 +101,121 @@ mod tests {
     }
 
     #[test]
-    fn list_row_at_degenerate_area_is_none() {
+    fn list_row_at_degenerate_width_is_none() {
         let mut a = area();
         a.width = 1;
         assert_eq!(list_row_at(a, 0, a.x, a.y + 1, 100), None);
+    }
 
+    #[test]
+    fn list_row_at_degenerate_height_is_none() {
         let mut a = area();
         a.height = 1;
         assert_eq!(list_row_at(a, 0, a.x + 1, a.y, 100), None);
     }
 
     #[test]
-    fn on_divider_hits_both_columns() {
+    fn on_divider_hits_left_column() {
         let a = area();
         let right_border = a.x + a.width - 1;
         assert!(on_divider(a, right_border, a.y));
+    }
+
+    #[test]
+    fn on_divider_hits_right_column() {
+        let a = area();
+        let right_border = a.x + a.width - 1;
         assert!(on_divider(a, right_border + 1, a.y));
+    }
+
+    #[test]
+    fn on_divider_misses_past_columns() {
+        let a = area();
+        let right_border = a.x + a.width - 1;
         assert!(!on_divider(a, right_border + 2, a.y));
+    }
+
+    #[test]
+    fn on_divider_misses_above_range() {
+        let a = area();
+        let right_border = a.x + a.width - 1;
         assert!(!on_divider(a, right_border, a.y.saturating_sub(1)));
+    }
+
+    #[test]
+    fn on_divider_misses_below_range() {
+        let a = area();
+        let right_border = a.x + a.width - 1;
         assert!(!on_divider(a, right_border, a.y + a.height));
     }
 
     #[test]
-    fn drag_pct_clamps() {
-        let body = Rect {
-            x: 10,
-            y: 5,
-            width: 40,
-            height: 20,
-        };
+    fn drag_pct_clamps_to_lower_bound() {
+        let body = area();
         assert_eq!(drag_pct(body, body.x), 20);
-        assert_eq!(drag_pct(body, body.x + body.width), 80);
-        assert_eq!(drag_pct(body, body.x + body.width / 2), 50);
+    }
 
+    #[test]
+    fn drag_pct_clamps_to_upper_bound() {
+        let body = area();
+        assert_eq!(drag_pct(body, body.x + body.width), 80);
+    }
+
+    #[test]
+    fn drag_pct_midpoint_is_unclamped() {
+        let body = area();
+        assert_eq!(drag_pct(body, body.x + body.width / 2), 50);
+    }
+
+    #[test]
+    fn drag_pct_zero_width_body_does_not_panic() {
         let empty_body = Rect {
             x: 10,
             y: 5,
             width: 0,
             height: 20,
         };
-        let _ = drag_pct(empty_body, 15);
+        assert_eq!(drag_pct(empty_body, 15), 80);
+    }
+
+    fn quadrant_slots() -> [Rect; 4] {
+        [
+            Rect {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            Rect {
+                x: 10,
+                y: 0,
+                width: 10,
+                height: 10,
+            },
+            Rect {
+                x: 0,
+                y: 10,
+                width: 10,
+                height: 10,
+            },
+            Rect {
+                x: 10,
+                y: 10,
+                width: 10,
+                height: 10,
+            },
+        ]
     }
 
     #[test]
     fn mosaic_cell_at_finds_cell() {
-        let slots = [
-            Rect {
-                x: 0,
-                y: 0,
-                width: 10,
-                height: 10,
-            },
-            Rect {
-                x: 10,
-                y: 0,
-                width: 10,
-                height: 10,
-            },
-            Rect {
-                x: 0,
-                y: 10,
-                width: 10,
-                height: 10,
-            },
-            Rect {
-                x: 10,
-                y: 10,
-                width: 10,
-                height: 10,
-            },
-        ];
+        let slots = quadrant_slots();
         assert_eq!(mosaic_cell_at(&slots, 5, 15), Some(2));
     }
 
     #[test]
     fn mosaic_cell_at_miss_is_none() {
-        let slots = [
-            Rect {
-                x: 0,
-                y: 0,
-                width: 10,
-                height: 10,
-            },
-            Rect {
-                x: 10,
-                y: 0,
-                width: 10,
-                height: 10,
-            },
-            Rect {
-                x: 0,
-                y: 10,
-                width: 10,
-                height: 10,
-            },
-            Rect {
-                x: 10,
-                y: 10,
-                width: 10,
-                height: 10,
-            },
-        ];
+        let slots = quadrant_slots();
         assert_eq!(mosaic_cell_at(&slots, 50, 50), None);
     }
 }
