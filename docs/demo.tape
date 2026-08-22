@@ -16,7 +16,7 @@ Enter
 Sleep 500ms
 Show
 
-Type "/Users/marcos/src/github.com/sonirico/claux/target/release/claux --console"
+Type "claux --console"
 Sleep 500ms
 Enter
 Sleep 2s
