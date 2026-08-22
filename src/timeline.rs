@@ -202,17 +202,44 @@ mod tests {
     }
 
     #[test]
-    fn stuck_requires_working_and_silence() {
-        assert!(is_stuck(AgentState::Working, 1000, 1301));
-        assert!(!is_stuck(AgentState::Working, 1000, 1299));
-        assert!(!is_stuck(AgentState::Waiting, 1000, 1301));
-        assert!(!is_stuck(AgentState::Working, 0, 999_999));
+    fn stuck_true_when_working_past_threshold() {
+        let (state, activity_s, now_s) = (AgentState::Working, 1000, 1301);
+        assert!(is_stuck(state, activity_s, now_s));
     }
 
     #[test]
-    fn format_age_units() {
-        assert_eq!(format_age(5_000), "5s");
-        assert_eq!(format_age(240_000), "4m");
-        assert_eq!(format_age(7_200_000), "2h");
+    fn stuck_false_when_under_threshold() {
+        let (state, activity_s, now_s) = (AgentState::Working, 1000, 1299);
+        assert!(!is_stuck(state, activity_s, now_s));
+    }
+
+    #[test]
+    fn stuck_false_when_not_working() {
+        let (state, activity_s, now_s) = (AgentState::Waiting, 1000, 1301);
+        assert!(!is_stuck(state, activity_s, now_s));
+    }
+
+    #[test]
+    fn stuck_false_when_activity_zero() {
+        let (state, activity_s, now_s) = (AgentState::Working, 0, 999_999);
+        assert!(!is_stuck(state, activity_s, now_s));
+    }
+
+    #[test]
+    fn format_age_seconds() {
+        let ms = 5_000;
+        assert_eq!(format_age(ms), "5s");
+    }
+
+    #[test]
+    fn format_age_minutes() {
+        let ms = 240_000;
+        assert_eq!(format_age(ms), "4m");
+    }
+
+    #[test]
+    fn format_age_hours() {
+        let ms = 7_200_000;
+        assert_eq!(format_age(ms), "2h");
     }
 }
