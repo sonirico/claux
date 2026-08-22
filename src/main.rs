@@ -26,7 +26,10 @@ mod vtrender;
 use ansi_to_tui::IntoText;
 use anyhow::Result;
 use ratatui::Frame;
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+    MouseButton, MouseEventKind,
+};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
@@ -151,6 +154,21 @@ struct App {
     /// In-memory history of agent state transitions, used to render the
     /// timeline strip and age label in the list.
     history: timeline::History,
+    /// Percentage width of the list panel versus the preview, adjusted by
+    /// dragging the divider between them.
+    split_pct: u16,
+    /// Whether the divider between the list and preview is currently being
+    /// dragged.
+    dragging: bool,
+    /// Full body area (list + preview) from the last draw, used to compute
+    /// the drag percentage.
+    body_area: Rect,
+    /// List panel area from the last draw, used for hit-testing clicks and
+    /// scroll on the list and divider.
+    list_area: Rect,
+    /// Mosaic grid cell areas from the last draw, used for hit-testing
+    /// clicks on mosaic cells.
+    mosaic_areas: [Rect; 4],
 }
 
 impl App {
@@ -184,6 +202,11 @@ impl App {
             cost: cost::CostTracker::new(),
             costs: HashMap::new(),
             history: timeline::History::new(),
+            split_pct: 40,
+            dragging: false,
+            body_area: Rect::default(),
+            list_area: Rect::default(),
+            mosaic_areas: [Rect::default(); 4],
         }
     }
 
@@ -589,6 +612,14 @@ fn act_and_maybe_exit(app: &mut App, act: impl FnOnce(&Window) -> Result<()>) ->
 /// Suspend the TUI (leave raw mode / alternate screen), run `f` with the
 /// terminal released, then restore the TUI. Used to hand the real terminal
 /// to `tmux attach-session` and get it back when the client detaches.
+struct MouseCaptureGuard;
+
+impl Drop for MouseCaptureGuard {
+    fn drop(&mut self) {
+        let _ = ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture);
+    }
+}
+
 fn suspend_and(
     terminal: &mut ratatui::DefaultTerminal,
     f: impl FnOnce() -> Result<()>,
@@ -597,9 +628,11 @@ fn suspend_and(
         EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
     };
     disable_raw_mode()?;
+    ratatui::crossterm::execute!(std::io::stdout(), DisableMouseCapture)?;
     ratatui::crossterm::execute!(std::io::stdout(), LeaveAlternateScreen)?;
     let res = f();
     ratatui::crossterm::execute!(std::io::stdout(), EnterAlternateScreen)?;
+    ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
     enable_raw_mode()?;
     terminal.clear()?;
     res
@@ -613,6 +646,8 @@ fn main() -> Result<()> {
     app.refresh();
 
     ratatui::run(|terminal| -> Result<()> {
+        ratatui::crossterm::execute!(std::io::stdout(), EnableMouseCapture)?;
+        let _mouse = MouseCaptureGuard;
         let mut last_tick = Instant::now();
         let mut last_focus_tick = Instant::now();
         loop {
@@ -629,224 +664,314 @@ fn main() -> Result<()> {
             } else {
                 TICK.saturating_sub(last_tick.elapsed())
             };
-            if event::poll(timeout)?
-                && let Event::Key(key) = event::read()?
-            {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                app.flash = None;
-                match app.mode {
-                    Mode::Filter => match key.code {
-                        KeyCode::Esc => {
-                            app.filter.clear();
-                            app.mode = Mode::Normal;
-                            app.apply_filter();
+            if event::poll(timeout)? {
+                match event::read()? {
+                    Event::Key(key) => {
+                        if key.kind != KeyEventKind::Press {
+                            continue;
                         }
-                        KeyCode::Enter => app.mode = Mode::Normal,
-                        KeyCode::Backspace => {
-                            app.filter.pop();
-                            app.apply_filter();
-                        }
-                        KeyCode::Char(c) => {
-                            app.filter.push(c);
-                            app.apply_filter();
-                        }
-                        _ => {}
-                    },
-                    Mode::Input => match key.code {
-                        KeyCode::Esc => {
-                            app.input.clear();
-                            app.mode = Mode::Normal;
-                        }
-                        KeyCode::Enter => {
-                            let text = std::mem::take(&mut app.input);
-                            app.mode = Mode::Normal;
-                            if let Some(w) = app.selected() {
-                                app.flash = match tmux::send_line(&w.target, &text) {
-                                    Ok(()) => Some(format!("sent to {}", w.target)),
-                                    Err(e) => Some(e.to_string()),
-                                };
-                            }
-                        }
-                        KeyCode::Backspace => {
-                            app.input.pop();
-                        }
-                        KeyCode::Char(c) => app.input.push(c),
-                        _ => {}
-                    },
-                    Mode::Normal => match key.code {
-                        KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
-                        KeyCode::Char('j') | KeyCode::Down => app.select_delta(1),
-                        KeyCode::Char('k') | KeyCode::Up => app.select_delta(-1),
-                        KeyCode::Char('g') | KeyCode::Home => {
-                            if !app.windows.is_empty() {
-                                app.list.select(Some(0));
-                                app.refresh_preview();
-                            }
-                        }
-                        KeyCode::Char('G') | KeyCode::End => {
-                            if !app.windows.is_empty() {
-                                app.list.select(Some(app.windows.len() - 1));
-                                app.refresh_preview();
-                            }
-                        }
-                        KeyCode::Char('r') => app.refresh(),
-                        KeyCode::Char('/') => app.mode = Mode::Filter,
-                        KeyCode::Char('i') => {
-                            if app.selected().is_some() {
-                                app.mode = Mode::Input;
-                            }
-                        }
-                        KeyCode::Char('x') => {
-                            if let Some(w) = app.selected() {
-                                let _ = tmux::kill(&w.target);
-                                app.refresh();
-                            }
-                        }
-                        KeyCode::Char('R') => {
-                            if let Some(w) = app.selected() {
-                                app.flash = match tmux::send_line(&w.target, "claude --continue") {
-                                    Ok(()) => Some(format!("resuming {}", w.target)),
-                                    Err(e) => Some(e.to_string()),
-                                };
-                            }
-                        }
-                        KeyCode::Char('n') => {
-                            if let Some(w) = app.selected().cloned() {
-                                match tmux::new_window(&w.session, &w.target) {
-                                    Ok(target) => {
-                                        if inside {
-                                            if let Err(e) = tmux::switch(&w.session) {
-                                                app.flash = Some(e.to_string());
-                                            } else if !app.console {
-                                                return Ok(());
-                                            } else {
-                                                app.flash = Some(format!("-> {target}"));
+                        app.flash = None;
+                        match app.mode {
+                            Mode::Filter => match key.code {
+                                KeyCode::Esc => {
+                                    app.filter.clear();
+                                    app.mode = Mode::Normal;
+                                    app.apply_filter();
+                                }
+                                KeyCode::Enter => app.mode = Mode::Normal,
+                                KeyCode::Backspace => {
+                                    app.filter.pop();
+                                    app.apply_filter();
+                                }
+                                KeyCode::Char(c) => {
+                                    app.filter.push(c);
+                                    app.apply_filter();
+                                }
+                                _ => {}
+                            },
+                            Mode::Input => match key.code {
+                                KeyCode::Esc => {
+                                    app.input.clear();
+                                    app.mode = Mode::Normal;
+                                }
+                                KeyCode::Enter => {
+                                    let text = std::mem::take(&mut app.input);
+                                    app.mode = Mode::Normal;
+                                    if let Some(w) = app.selected() {
+                                        app.flash = match tmux::send_line(&w.target, &text) {
+                                            Ok(()) => Some(format!("sent to {}", w.target)),
+                                            Err(e) => Some(e.to_string()),
+                                        };
+                                    }
+                                }
+                                KeyCode::Backspace => {
+                                    app.input.pop();
+                                }
+                                KeyCode::Char(c) => app.input.push(c),
+                                _ => {}
+                            },
+                            Mode::Normal => match key.code {
+                                KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                                KeyCode::Char('j') | KeyCode::Down => app.select_delta(1),
+                                KeyCode::Char('k') | KeyCode::Up => app.select_delta(-1),
+                                KeyCode::Char('g') | KeyCode::Home => {
+                                    if !app.windows.is_empty() {
+                                        app.list.select(Some(0));
+                                        app.refresh_preview();
+                                    }
+                                }
+                                KeyCode::Char('G') | KeyCode::End => {
+                                    if !app.windows.is_empty() {
+                                        app.list.select(Some(app.windows.len() - 1));
+                                        app.refresh_preview();
+                                    }
+                                }
+                                KeyCode::Char('r') => app.refresh(),
+                                KeyCode::Char('/') => app.mode = Mode::Filter,
+                                KeyCode::Char('i') => {
+                                    if app.selected().is_some() {
+                                        app.mode = Mode::Input;
+                                    }
+                                }
+                                KeyCode::Char('x') => {
+                                    if let Some(w) = app.selected() {
+                                        let _ = tmux::kill(&w.target);
+                                        app.refresh();
+                                    }
+                                }
+                                KeyCode::Char('R') => {
+                                    if let Some(w) = app.selected() {
+                                        app.flash =
+                                            match tmux::send_line(&w.target, "claude --continue") {
+                                                Ok(()) => Some(format!("resuming {}", w.target)),
+                                                Err(e) => Some(e.to_string()),
+                                            };
+                                    }
+                                }
+                                KeyCode::Char('n') => {
+                                    if let Some(w) = app.selected().cloned() {
+                                        match tmux::new_window(&w.session, &w.target) {
+                                            Ok(target) => {
+                                                if inside {
+                                                    if let Err(e) = tmux::switch(&w.session) {
+                                                        app.flash = Some(e.to_string());
+                                                    } else if !app.console {
+                                                        return Ok(());
+                                                    } else {
+                                                        app.flash = Some(format!("-> {target}"));
+                                                    }
+                                                } else if let Err(e) = suspend_and(terminal, || {
+                                                    tmux::attach(&w.session, &target)
+                                                }) {
+                                                    app.flash = Some(e.to_string());
+                                                }
+                                                app.refresh();
                                             }
-                                        } else if let Err(e) = suspend_and(terminal, || {
-                                            tmux::attach(&w.session, &target)
+                                            Err(e) => app.flash = Some(e.to_string()),
+                                        }
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(w) = app.selected().cloned() {
+                                        app.mode = Mode::Focus;
+                                        app.enter_focus(&w);
+                                        if app.vt.is_none() {
+                                            app.refresh_preview();
+                                        }
+                                        last_focus_tick = Instant::now();
+                                    }
+                                }
+                                KeyCode::Char('m') => {
+                                    app.enter_mosaic();
+                                    if !app.mosaic_cells.is_empty() {
+                                        app.mode = Mode::Mosaic;
+                                    }
+                                }
+                                KeyCode::Char('o') => {
+                                    if inside {
+                                        if act_and_maybe_exit(&mut app, tmux::jump) {
+                                            return Ok(());
+                                        }
+                                    } else if let Some(w) = app.selected().cloned() {
+                                        if let Err(e) = suspend_and(terminal, || {
+                                            tmux::attach(&w.session, &w.target)
                                         }) {
                                             app.flash = Some(e.to_string());
                                         }
                                         app.refresh();
+                                        last_tick = Instant::now();
                                     }
-                                    Err(e) => app.flash = Some(e.to_string()),
                                 }
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if let Some(w) = app.selected().cloned() {
-                                app.mode = Mode::Focus;
-                                app.enter_focus(&w);
-                                if app.vt.is_none() {
-                                    app.refresh_preview();
-                                }
-                                last_focus_tick = Instant::now();
-                            }
-                        }
-                        KeyCode::Char('m') => {
-                            app.enter_mosaic();
-                            if !app.mosaic_cells.is_empty() {
-                                app.mode = Mode::Mosaic;
-                            }
-                        }
-                        KeyCode::Char('o') => {
-                            if inside {
-                                if act_and_maybe_exit(&mut app, tmux::jump) {
-                                    return Ok(());
-                                }
-                            } else if let Some(w) = app.selected().cloned() {
-                                if let Err(e) =
-                                    suspend_and(terminal, || tmux::attach(&w.session, &w.target))
+                                _ => {}
+                            },
+                            Mode::Focus => {
+                                if key.code == KeyCode::Char('q')
+                                    && key.modifiers.contains(KeyModifiers::CONTROL)
                                 {
-                                    app.flash = Some(e.to_string());
+                                    // Control client (if any) stays alive for reuse;
+                                    // only killed on app exit (see ControlClient's Drop).
+                                    app.mode = Mode::Normal;
+                                } else if let Some(w) = app.selected().cloned() {
+                                    if let Err(e) = tmux::send_key(&w.target, key) {
+                                        app.flash = Some(e.to_string());
+                                    }
+                                    if app.vt.is_none() {
+                                        app.refresh_preview();
+                                        last_focus_tick = Instant::now();
+                                    }
+                                    // With a live control client the pane's own
+                                    // %output echo of the keystroke is what updates
+                                    // the preview - no extra fetch needed here.
                                 }
-                                app.refresh();
-                                last_tick = Instant::now();
                             }
-                        }
-                        _ => {}
-                    },
-                    Mode::Focus => {
-                        if key.code == KeyCode::Char('q')
-                            && key.modifiers.contains(KeyModifiers::CONTROL)
-                        {
-                            // Control client (if any) stays alive for reuse;
-                            // only killed on app exit (see ControlClient's Drop).
-                            app.mode = Mode::Normal;
-                        } else if let Some(w) = app.selected().cloned() {
-                            if let Err(e) = tmux::send_key(&w.target, key) {
-                                app.flash = Some(e.to_string());
-                            }
-                            if app.vt.is_none() {
-                                app.refresh_preview();
-                                last_focus_tick = Instant::now();
-                            }
-                            // With a live control client the pane's own
-                            // %output echo of the keystroke is what updates
-                            // the preview - no extra fetch needed here.
+                            Mode::Mosaic => match key.code {
+                                KeyCode::Char('m') | KeyCode::Char('q') | KeyCode::Esc => {
+                                    app.exit_mosaic();
+                                    app.mode = Mode::Normal;
+                                }
+                                KeyCode::Char('h') | KeyCode::Left => {
+                                    let len = app.mosaic_cells.len();
+                                    if len > 0 {
+                                        app.mosaic_selected = (app.mosaic_selected as i32 - 1)
+                                            .clamp(0, len as i32 - 1)
+                                            as usize;
+                                    }
+                                }
+                                KeyCode::Char('l') | KeyCode::Right => {
+                                    let len = app.mosaic_cells.len();
+                                    if len > 0 {
+                                        app.mosaic_selected = (app.mosaic_selected as i32 + 1)
+                                            .clamp(0, len as i32 - 1)
+                                            as usize;
+                                    }
+                                }
+                                KeyCode::Char('j') | KeyCode::Down => {
+                                    let len = app.mosaic_cells.len();
+                                    if len > 0 {
+                                        app.mosaic_selected = (app.mosaic_selected as i32 + 2)
+                                            .clamp(0, len as i32 - 1)
+                                            as usize;
+                                    }
+                                }
+                                KeyCode::Char('k') | KeyCode::Up => {
+                                    let len = app.mosaic_cells.len();
+                                    if len > 0 {
+                                        app.mosaic_selected = (app.mosaic_selected as i32 - 2)
+                                            .clamp(0, len as i32 - 1)
+                                            as usize;
+                                    }
+                                }
+                                KeyCode::Enter => {
+                                    if let Some(window) = app
+                                        .mosaic_cells
+                                        .get(app.mosaic_selected)
+                                        .map(|c| c.window.clone())
+                                    {
+                                        if let Some(idx) = app
+                                            .windows
+                                            .iter()
+                                            .position(|w| w.target == window.target)
+                                        {
+                                            app.list.select(Some(idx));
+                                        }
+                                        app.exit_mosaic();
+                                        app.mode = Mode::Focus;
+                                        app.enter_focus(&window);
+                                        if app.vt.is_none() {
+                                            app.refresh_preview();
+                                        }
+                                        last_focus_tick = Instant::now();
+                                    }
+                                }
+                                _ => {}
+                            },
                         }
                     }
-                    Mode::Mosaic => match key.code {
-                        KeyCode::Char('m') | KeyCode::Char('q') | KeyCode::Esc => {
-                            app.exit_mosaic();
-                            app.mode = Mode::Normal;
-                        }
-                        KeyCode::Char('h') | KeyCode::Left => {
-                            let len = app.mosaic_cells.len();
-                            if len > 0 {
-                                app.mosaic_selected = (app.mosaic_selected as i32 - 1)
-                                    .clamp(0, len as i32 - 1)
-                                    as usize;
-                            }
-                        }
-                        KeyCode::Char('l') | KeyCode::Right => {
-                            let len = app.mosaic_cells.len();
-                            if len > 0 {
-                                app.mosaic_selected = (app.mosaic_selected as i32 + 1)
-                                    .clamp(0, len as i32 - 1)
-                                    as usize;
-                            }
-                        }
-                        KeyCode::Char('j') | KeyCode::Down => {
-                            let len = app.mosaic_cells.len();
-                            if len > 0 {
-                                app.mosaic_selected = (app.mosaic_selected as i32 + 2)
-                                    .clamp(0, len as i32 - 1)
-                                    as usize;
-                            }
-                        }
-                        KeyCode::Char('k') | KeyCode::Up => {
-                            let len = app.mosaic_cells.len();
-                            if len > 0 {
-                                app.mosaic_selected = (app.mosaic_selected as i32 - 2)
-                                    .clamp(0, len as i32 - 1)
-                                    as usize;
-                            }
-                        }
-                        KeyCode::Enter => {
-                            if let Some(window) = app
-                                .mosaic_cells
-                                .get(app.mosaic_selected)
-                                .map(|c| c.window.clone())
-                            {
-                                if let Some(idx) =
-                                    app.windows.iter().position(|w| w.target == window.target)
-                                {
-                                    app.list.select(Some(idx));
+                    Event::Mouse(m) => {
+                        if app.mode == Mode::Focus
+                            || app.mode == Mode::Filter
+                            || app.mode == Mode::Input
+                        {
+                        } else if app.mode == Mode::Mosaic {
+                            if let MouseEventKind::Down(MouseButton::Left) = m.kind {
+                                let hit = mouse::mosaic_cell_at(&app.mosaic_areas, m.column, m.row);
+                                if let Some(i) = hit {
+                                    if i < app.mosaic_cells.len() {
+                                        if i == app.mosaic_selected {
+                                            if let Some(window) = app
+                                                .mosaic_cells
+                                                .get(app.mosaic_selected)
+                                                .map(|c| c.window.clone())
+                                            {
+                                                if let Some(idx) = app
+                                                    .windows
+                                                    .iter()
+                                                    .position(|w| w.target == window.target)
+                                                {
+                                                    app.list.select(Some(idx));
+                                                }
+                                                app.exit_mosaic();
+                                                app.mode = Mode::Focus;
+                                                app.enter_focus(&window);
+                                                if app.vt.is_none() {
+                                                    app.refresh_preview();
+                                                }
+                                                last_focus_tick = Instant::now();
+                                            }
+                                        } else {
+                                            app.mosaic_selected = i;
+                                        }
+                                    }
                                 }
-                                app.exit_mosaic();
-                                app.mode = Mode::Focus;
-                                app.enter_focus(&window);
-                                if app.vt.is_none() {
-                                    app.refresh_preview();
+                            }
+                        } else if app.mode == Mode::Normal {
+                            match m.kind {
+                                MouseEventKind::ScrollDown => {
+                                    app.flash = None;
+                                    app.select_delta(1);
                                 }
-                                last_focus_tick = Instant::now();
+                                MouseEventKind::ScrollUp => {
+                                    app.flash = None;
+                                    app.select_delta(-1);
+                                }
+                                MouseEventKind::Down(MouseButton::Left) => {
+                                    app.flash = None;
+                                    if mouse::on_divider(app.list_area, m.column, m.row) {
+                                        app.dragging = true;
+                                    } else if let Some(i) = mouse::list_row_at(
+                                        app.list_area,
+                                        app.list.offset(),
+                                        m.column,
+                                        m.row,
+                                        app.windows.len(),
+                                    ) {
+                                        if app.list.selected() == Some(i) {
+                                            if let Some(w) = app.selected().cloned() {
+                                                app.mode = Mode::Focus;
+                                                app.enter_focus(&w);
+                                                if app.vt.is_none() {
+                                                    app.refresh_preview();
+                                                }
+                                                last_focus_tick = Instant::now();
+                                            }
+                                        } else {
+                                            app.list.select(Some(i));
+                                        }
+                                    }
+                                }
+                                MouseEventKind::Drag(MouseButton::Left) => {
+                                    if app.dragging {
+                                        app.split_pct = mouse::drag_pct(app.body_area, m.column);
+                                    }
+                                }
+                                MouseEventKind::Up(MouseButton::Left) => {
+                                    app.dragging = false;
+                                }
+                                _ => {}
                             }
                         }
-                        _ => {}
-                    },
+                    }
+                    _ => {}
                 }
             }
             if app.mode == Mode::Focus {
@@ -903,9 +1028,12 @@ fn draw(frame: &mut Frame, app: &mut App) {
     if app.mode == Mode::Mosaic {
         draw_mosaic(frame, app, body);
     } else {
-        let [left, right] =
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .areas(body);
+        app.body_area = body;
+        let [left, right] = Layout::horizontal([
+            Constraint::Percentage(app.split_pct),
+            Constraint::Percentage(100 - app.split_pct),
+        ])
+        .areas(body);
         draw_list(frame, app, left);
         draw_preview(frame, app, right);
     }
@@ -915,7 +1043,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
 /// Draws the mosaic grid: a fixed 2x2 split, one bordered block per cell
 /// showing the live vt100 preview (or the cell's error) with the selected
 /// cell's border overridden to green bold.
-fn draw_mosaic(frame: &mut Frame, app: &App, area: Rect) {
+fn draw_mosaic(frame: &mut Frame, app: &mut App, area: Rect) {
     let [top, bottom] =
         Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
     let [tl, tr] =
@@ -923,6 +1051,7 @@ fn draw_mosaic(frame: &mut Frame, app: &App, area: Rect) {
     let [bl, br] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(bottom);
     let slots = [tl, tr, bl, br];
+    app.mosaic_areas = slots;
 
     for (i, slot) in slots.into_iter().enumerate() {
         let Some(cell) = app.mosaic_cells.get(i) else {
@@ -979,6 +1108,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    app.list_area = area;
     let now = now_ms();
     let now_s = now / 1000;
     let items: Vec<ListItem> = app

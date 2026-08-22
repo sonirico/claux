@@ -2,8 +2,6 @@
 //! rows, the list/preview divider, mosaic cells - kept free of App state so
 //! they stay unit-testable; the event wiring lives in main.rs.
 
-#![allow(dead_code)]
-
 use ratatui::layout::{Position, Rect};
 
 pub fn list_row_at(area: Rect, offset: usize, x: u16, y: u16, len: usize) -> Option<usize> {

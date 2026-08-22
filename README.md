@@ -56,7 +56,14 @@ when any window reports a transcript, a fleet-wide cost total. Each row
 shows its own accumulated USD cost next to the context percentage, when
 available (see Cost tracking below). Each row also shows a timeline strip
 and state age, and flags a stalled working agent as `stuck!` (see Timeline
-below).
+below). The mouse works too (see Mouse below).
+
+## Mouse
+
+Click a row in the list to select it, click it again to enter focus mode
+(the same gesture works on a mosaic cell). The scroll wheel moves the
+selection up and down. Drag the border between the list and the preview to
+resize the split. In focus mode the mouse is ignored; use the keyboard.
 
 ## Focus mode (control mode)
 
