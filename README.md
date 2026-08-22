@@ -48,7 +48,9 @@ m opens mosaic mode (see below).
 The list auto-refreshes every 500ms; the header shows fleet counters and,
 when any window reports a transcript, a fleet-wide cost total. Each row
 shows its own accumulated USD cost next to the context percentage, when
-available (see Cost tracking below).
+available (see Cost tracking below). Each row also shows a timeline strip
+and state age, and flags a stalled working agent as `stuck!` (see Timeline
+below).
 
 ## Focus mode (control mode)
 
@@ -99,6 +101,15 @@ transcript incrementally and shows the accumulated USD cost per agent in the
 list, plus a fleet total in the header. Figures are approximations computed
 at standard first-party API rates from the transcript's own usage blocks.
 Windows without the option simply show no cost.
+
+## Timeline
+
+Each row shows a 5-minute strip of the agent's recent states: 10 buckets of
+30 seconds, colored the same as the state icons, followed by how long the
+agent has been in its current state. A working agent whose pane has produced
+no output for 5 minutes is flagged as `stuck!` in red, using tmux's own
+`window_activity` timestamp. History lives only in claux's memory and starts
+fresh when claux starts.
 
 ## Surviving reboots
 

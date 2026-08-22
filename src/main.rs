@@ -147,6 +147,9 @@ struct App {
     cost: cost::CostTracker,
     /// Latest accumulated USD cost per window, keyed by window target.
     costs: HashMap<String, f64>,
+    /// In-memory history of agent state transitions, used to render the
+    /// timeline strip and age label in the list.
+    history: timeline::History,
 }
 
 impl App {
@@ -179,6 +182,7 @@ impl App {
             mosaic_selected: 0,
             cost: cost::CostTracker::new(),
             costs: HashMap::new(),
+            history: timeline::History::new(),
         }
     }
 
@@ -210,6 +214,7 @@ impl App {
             .iter()
             .map(|w| (w.pane_id.clone(), w.state))
             .collect();
+        self.history.record(now_ms(), &self.all);
         let cost = &mut self.cost;
         self.costs = self
             .all
@@ -536,6 +541,13 @@ impl App {
         }
         applied
     }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn raw_strip(s: &str) -> String {
@@ -966,6 +978,8 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
+    let now = now_ms();
+    let now_s = now / 1000;
     let items: Vec<ListItem> = app
         .windows
         .iter()
@@ -974,8 +988,22 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans = vec![
                 Span::styled(format!("{icon} "), style),
                 Span::raw(format!("{:<18}", w.target)),
-                Span::styled(format!("{:<11}", w.state.label()), style),
             ];
+            if timeline::is_stuck(w.state, w.activity, now_s) {
+                spans.push(Span::styled(
+                    format!("{:<11}", "stuck!"),
+                    Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(format!("{:<11}", w.state.label()), style));
+            }
+            match app.history.age_ms(&w.pane_id, now) {
+                Some(a) => spans.push(Span::styled(
+                    format!("{:>4} ", timeline::format_age(a)),
+                    Style::new().fg(Color::DarkGray),
+                )),
+                None => spans.push(Span::raw(" ".repeat(5))),
+            }
             if let Some(ctx) = &w.ctx {
                 spans.push(Span::styled(
                     format!("{ctx:>3}% "),
@@ -992,6 +1020,14 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 spans.push(Span::raw(" ".repeat(9)));
             }
+            let strip = app.history.strip(&w.pane_id, now);
+            for s in strip {
+                match s {
+                    Some(s) => spans.push(Span::styled("\u{2588}".to_string(), state_style(s).1)),
+                    None => spans.push(Span::raw(" ")),
+                }
+            }
+            spans.push(Span::raw(" "));
             spans.push(Span::raw(w.name.clone()));
             spans.push(Span::styled(
                 format!("  ({})", w.dir),
