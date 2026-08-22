@@ -17,6 +17,7 @@
 
 mod control;
 mod cost;
+mod mouse;
 mod notify;
 mod timeline;
 mod tmux;
