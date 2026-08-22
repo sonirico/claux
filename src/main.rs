@@ -30,7 +30,7 @@ use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
     MouseButton, MouseEventKind,
 };
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
@@ -169,6 +169,9 @@ struct App {
     /// Mosaic grid cell areas from the last draw, used for hit-testing
     /// clicks on mosaic cells.
     mosaic_areas: [Rect; 4],
+    /// Preview panel area from the last draw; a click inside it enters
+    /// focus mode on the selected window.
+    preview_area: Rect,
 }
 
 impl App {
@@ -207,6 +210,7 @@ impl App {
             body_area: Rect::default(),
             list_area: Rect::default(),
             mosaic_areas: [Rect::default(); 4],
+            preview_area: Rect::default(),
         }
     }
 
@@ -957,6 +961,18 @@ fn main() -> Result<()> {
                                         } else {
                                             app.list.select(Some(i));
                                         }
+                                    } else if app.preview_area.contains(Position {
+                                        x: m.column,
+                                        y: m.row,
+                                    }) {
+                                        if let Some(w) = app.selected().cloned() {
+                                            app.mode = Mode::Focus;
+                                            app.enter_focus(&w);
+                                            if app.vt.is_none() {
+                                                app.refresh_preview();
+                                            }
+                                            last_focus_tick = Instant::now();
+                                        }
                                     }
                                 }
                                 MouseEventKind::Drag(MouseButton::Left) => {
@@ -1034,6 +1050,7 @@ fn draw(frame: &mut Frame, app: &mut App) {
             Constraint::Percentage(100 - app.split_pct),
         ])
         .areas(body);
+        app.preview_area = right;
         draw_list(frame, app, left);
         draw_preview(frame, app, right);
     }
@@ -1111,6 +1128,14 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     app.list_area = area;
     let now = now_ms();
     let now_s = now / 1000;
+    // Columns degrade gracefully as the panel narrows: the least essential
+    // ones drop first so the target, state and name always stay readable.
+    let inner_w = area.width.saturating_sub(2);
+    let show_age = inner_w >= 48;
+    let show_ctx = inner_w >= 54;
+    let show_cost = inner_w >= 64;
+    let show_strip = inner_w >= 76;
+    let show_dir = inner_w >= 100;
     let items: Vec<ListItem> = app
         .windows
         .iter()
@@ -1128,42 +1153,54 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 spans.push(Span::styled(format!("{:<11}", w.state.label()), style));
             }
-            match app.history.age_ms(&w.pane_id, now) {
-                Some(a) => spans.push(Span::styled(
-                    format!("{:>4} ", timeline::format_age(a)),
-                    Style::new().fg(Color::DarkGray),
-                )),
-                None => spans.push(Span::raw(" ".repeat(5))),
-            }
-            if let Some(ctx) = &w.ctx {
-                spans.push(Span::styled(
-                    format!("{ctx:>3}% "),
-                    Style::new().fg(Color::DarkGray),
-                ));
-            } else {
-                spans.push(Span::raw("     "));
-            }
-            if let Some(c) = app.costs.get(&w.target) {
-                spans.push(Span::styled(
-                    format!("{:>8} ", format!("${c:.2}")),
-                    Style::new().fg(Color::DarkGray),
-                ));
-            } else {
-                spans.push(Span::raw(" ".repeat(9)));
-            }
-            let strip = app.history.strip(&w.pane_id, now);
-            for s in strip {
-                match s {
-                    Some(s) => spans.push(Span::styled("\u{2588}".to_string(), state_style(s).1)),
-                    None => spans.push(Span::raw(" ")),
+            if show_age {
+                match app.history.age_ms(&w.pane_id, now) {
+                    Some(a) => spans.push(Span::styled(
+                        format!("{:>4} ", timeline::format_age(a)),
+                        Style::new().fg(Color::DarkGray),
+                    )),
+                    None => spans.push(Span::raw(" ".repeat(5))),
                 }
             }
-            spans.push(Span::raw(" "));
+            if show_ctx {
+                if let Some(ctx) = &w.ctx {
+                    spans.push(Span::styled(
+                        format!("{ctx:>3}% "),
+                        Style::new().fg(Color::DarkGray),
+                    ));
+                } else {
+                    spans.push(Span::raw("     "));
+                }
+            }
+            if show_cost {
+                if let Some(c) = app.costs.get(&w.target) {
+                    spans.push(Span::styled(
+                        format!("{:>8} ", format!("${c:.2}")),
+                        Style::new().fg(Color::DarkGray),
+                    ));
+                } else {
+                    spans.push(Span::raw(" ".repeat(9)));
+                }
+            }
+            if show_strip {
+                let strip = app.history.strip(&w.pane_id, now);
+                for s in strip {
+                    match s {
+                        Some(s) => {
+                            spans.push(Span::styled("\u{2588}".to_string(), state_style(s).1))
+                        }
+                        None => spans.push(Span::raw(" ")),
+                    }
+                }
+                spans.push(Span::raw(" "));
+            }
             spans.push(Span::raw(w.name.clone()));
-            spans.push(Span::styled(
-                format!("  ({})", w.dir),
-                Style::new().fg(Color::DarkGray),
-            ));
+            if show_dir {
+                spans.push(Span::styled(
+                    format!("  ({})", w.dir),
+                    Style::new().fg(Color::DarkGray),
+                ));
+            }
             ListItem::new(Line::from(spans))
         })
         .collect();
