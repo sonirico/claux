@@ -114,39 +114,38 @@ mod tests {
         assert_eq!(list_row_at(a, 0, a.x + 1, a.y, 100), None);
     }
 
+    fn right_border(a: Rect) -> u16 {
+        a.x + a.width - 1
+    }
+
     #[test]
     fn on_divider_hits_left_column() {
         let a = area();
-        let right_border = a.x + a.width - 1;
-        assert!(on_divider(a, right_border, a.y));
+        assert!(on_divider(a, right_border(a), a.y));
     }
 
     #[test]
     fn on_divider_hits_right_column() {
         let a = area();
-        let right_border = a.x + a.width - 1;
-        assert!(on_divider(a, right_border + 1, a.y));
+        assert!(on_divider(a, right_border(a) + 1, a.y));
     }
 
     #[test]
     fn on_divider_misses_past_columns() {
         let a = area();
-        let right_border = a.x + a.width - 1;
-        assert!(!on_divider(a, right_border + 2, a.y));
+        assert!(!on_divider(a, right_border(a) + 2, a.y));
     }
 
     #[test]
     fn on_divider_misses_above_range() {
         let a = area();
-        let right_border = a.x + a.width - 1;
-        assert!(!on_divider(a, right_border, a.y.saturating_sub(1)));
+        assert!(!on_divider(a, right_border(a), a.y.saturating_sub(1)));
     }
 
     #[test]
     fn on_divider_misses_below_range() {
         let a = area();
-        let right_border = a.x + a.width - 1;
-        assert!(!on_divider(a, right_border, a.y + a.height));
+        assert!(!on_divider(a, right_border(a), a.y + a.height));
     }
 
     #[test]
