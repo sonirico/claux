@@ -85,6 +85,27 @@ fn short_group(g: &str) -> String {
     tail.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect()
 }
 
+/// Runs the `CLAUX_GROUP_CLOSE` command with the group tag as its only
+/// argument and boils the outcome down to one flash line. What "closing a
+/// group" means is entirely the command's business; claux never touches
+/// git, worktrees or state files itself.
+fn run_group_close(cmd: &str, group: &str) -> String {
+    match std::process::Command::new(cmd).arg(group).output() {
+        Ok(out) if out.status.success() => format!("closed group {}", short_group(group)),
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let msg = stdout
+                .lines()
+                .last()
+                .or_else(|| stderr.lines().last())
+                .unwrap_or("failed");
+            format!("close: {msg}")
+        }
+        Err(e) => format!("close: {e}"),
+    }
+}
+
 #[derive(PartialEq)]
 enum Mode {
     Normal,
@@ -150,6 +171,9 @@ struct App {
     /// Toggled with `t`: cluster windows by `@agent_group` instead of the
     /// default flat urgency sort.
     group_view: bool,
+    /// Group tag armed by a first `X` press; a second `X` on the same group
+    /// runs the `CLAUX_GROUP_CLOSE` command. Any other key disarms it.
+    confirm_close: Option<String>,
     /// Live cells of the mosaic grid, snapshotted from `self.windows` on
     /// entry and left unaffected by later re-sorts.
     mosaic_cells: Vec<MosaicCell>,
@@ -211,6 +235,7 @@ impl App {
             prev_states: HashMap::new(),
             notify,
             group_view: false,
+            confirm_close: None,
             mosaic_cells: Vec::new(),
             mosaic_clients: Vec::new(),
             mosaic_selected: 0,
@@ -690,6 +715,7 @@ fn main() -> Result<()> {
                             continue;
                         }
                         app.flash = None;
+                        let pending_close = app.confirm_close.take();
                         match app.mode {
                             Mode::Filter => match key.code {
                                 KeyCode::Esc => {
@@ -760,6 +786,33 @@ fn main() -> Result<()> {
                                     if let Some(w) = app.selected() {
                                         let _ = tmux::kill(&w.target);
                                         app.refresh();
+                                    }
+                                }
+                                KeyCode::Char('X') => {
+                                    if let Some(w) = app.selected().cloned() {
+                                        match (w.group, std::env::var("CLAUX_GROUP_CLOSE")) {
+                                            (Some(g), Ok(cmd)) => {
+                                                if pending_close.as_deref() == Some(g.as_str()) {
+                                                    app.flash =
+                                                        Some(run_group_close(&cmd, &g));
+                                                    app.refresh();
+                                                } else {
+                                                    app.flash = Some(format!(
+                                                        "X again to close group {}",
+                                                        short_group(&g)
+                                                    ));
+                                                    app.confirm_close = Some(g);
+                                                }
+                                            }
+                                            (None, _) => {
+                                                app.flash =
+                                                    Some("no group on this window".to_string());
+                                            }
+                                            (_, Err(_)) => {
+                                                app.flash =
+                                                    Some("CLAUX_GROUP_CLOSE not set".to_string());
+                                            }
+                                        }
                                     }
                                 }
                                 KeyCode::Char('R') => {
@@ -1322,7 +1375,11 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     "o: attach (prefix+d back)"
                 };
-                let group_hint = if app.group_view { "t: ungroup" } else { "t: group" };
+                let group_hint = if app.group_view {
+                    "t: ungroup   X: close group"
+                } else {
+                    "t: group"
+                };
                 Line::from(Span::styled(
                     format!(
                         " enter: focus   {attach_hint}   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
