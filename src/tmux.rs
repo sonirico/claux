@@ -69,6 +69,10 @@ pub struct Window {
     /// 0 when unavailable. Used for stuck detection: a working agent whose
     /// pane has been silent too long.
     pub activity: u64,
+    /// Lineage tag published by whatever spawned this window (e.g. clauding's
+    /// `CLAUDING_TASK_ID`) via the hook-owned `@agent_group` window option.
+    /// `None` when unset; claux stays agnostic of what the tag means.
+    pub group: Option<String>,
 }
 
 fn tmux(args: &[&str]) -> Result<String> {
@@ -87,7 +91,7 @@ fn tmux(args: &[&str]) -> Result<String> {
 }
 
 pub fn list_windows() -> Result<Vec<Window>> {
-    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}";
+    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}\t#{@agent_group}";
     let out = tmux(&["list-windows", "-a", "-F", fmt])?;
     let mut windows: Vec<Window> = out.lines().filter_map(parse_line).collect();
     windows.sort_by(|a, b| (a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)));
@@ -107,6 +111,7 @@ fn parse_line(line: &str) -> Option<Window> {
     let pane_rows: u16 = f.next()?.parse().ok()?;
     let transcript = f.next().filter(|s| !s.is_empty()).map(str::to_string);
     let activity: u64 = f.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let group = f.next().filter(|s| !s.is_empty()).map(str::to_string);
     Some(Window {
         target: format!("{session}:{index}"),
         session,
@@ -120,7 +125,37 @@ fn parse_line(line: &str) -> Option<Window> {
         pane_rows,
         transcript,
         activity,
+        group,
     })
+}
+
+/// Reorders windows so shared `group` values sit together (ungrouped last),
+/// clusters ordered by their most urgent member, and members within a
+/// cluster keeping their urgency order. Used by the console's group toggle;
+/// the default flat view stays sorted purely by urgency (see `list_windows`).
+pub fn sort_grouped(windows: &mut [Window]) {
+    use std::collections::HashMap;
+    let mut best: HashMap<String, (AgentState, usize)> = HashMap::new();
+    for (i, w) in windows.iter().enumerate() {
+        if let Some(g) = &w.group {
+            best.entry(g.clone())
+                .and_modify(|b| *b = (*b).min((w.state, i)))
+                .or_insert((w.state, i));
+        }
+    }
+    windows.sort_by(|a, b| {
+        let ka = a
+            .group
+            .as_ref()
+            .map(|g| (0u8, best[g], g.clone()))
+            .unwrap_or((1, (AgentState::None, usize::MAX), String::new()));
+        let kb = b
+            .group
+            .as_ref()
+            .map(|g| (0u8, best[g], g.clone()))
+            .unwrap_or((1, (AgentState::None, usize::MAX), String::new()));
+        ka.cmp(&kb).then((a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)))
+    });
 }
 
 /// Visible content of the window's active pane, with ANSI colors.
@@ -371,7 +406,7 @@ mod tests {
     #[test]
     fn parse_line_full_fields() {
         let line =
-            "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl\t1700000000";
+            "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl\t1700000000\tgrp1";
         let window = parse_line(line).unwrap();
         assert_eq!(window.target, "sess:0");
         assert_eq!(window.pane_id, "%3");
@@ -379,6 +414,7 @@ mod tests {
         assert_eq!(window.pane_rows, 24);
         assert_eq!(window.transcript, Some("/tmp/transcript.jsonl".to_string()));
         assert_eq!(window.activity, 1700000000);
+        assert_eq!(window.group, Some("grp1".to_string()));
     }
 
     #[test]

@@ -77,6 +77,14 @@ fn state_style(state: AgentState) -> (char, Style) {
     }
 }
 
+/// Trims a lineage tag (e.g. clauding's `<channel>.<ts>`) down to something
+/// that fits the group column; claux does not know or care what the tag
+/// encodes beyond "windows sharing it are related".
+fn short_group(g: &str) -> String {
+    let tail = g.rsplit('.').next().unwrap_or(g);
+    tail.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect()
+}
+
 #[derive(PartialEq)]
 enum Mode {
     Normal,
@@ -139,6 +147,9 @@ struct App {
     prev_states: HashMap<String, AgentState>,
     /// Whether desktop notifications are enabled (`--no-notify` disables).
     notify: bool,
+    /// Toggled with `t`: cluster windows by `@agent_group` instead of the
+    /// default flat urgency sort.
+    group_view: bool,
     /// Live cells of the mosaic grid, snapshotted from `self.windows` on
     /// entry and left unaffected by later re-sorts.
     mosaic_cells: Vec<MosaicCell>,
@@ -199,6 +210,7 @@ impl App {
             last_preview_inner: Rect::default(),
             prev_states: HashMap::new(),
             notify,
+            group_view: false,
             mosaic_cells: Vec::new(),
             mosaic_clients: Vec::new(),
             mosaic_selected: 0,
@@ -271,6 +283,9 @@ impl App {
             })
             .cloned()
             .collect();
+        if self.group_view {
+            tmux::sort_grouped(&mut self.windows);
+        }
         let idx = keep
             .and_then(|t| self.windows.iter().position(|w| w.target == t))
             .unwrap_or(0);
@@ -731,6 +746,10 @@ fn main() -> Result<()> {
                                     }
                                 }
                                 KeyCode::Char('r') => app.refresh(),
+                                KeyCode::Char('t') => {
+                                    app.group_view = !app.group_view;
+                                    app.apply_filter();
+                                }
                                 KeyCode::Char('/') => app.mode = Mode::Filter,
                                 KeyCode::Char('i') => {
                                     if app.selected().is_some() {
@@ -1194,6 +1213,15 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 spans.push(Span::raw(" "));
             }
+            if app.group_view {
+                match &w.group {
+                    Some(g) => spans.push(Span::styled(
+                        format!("{:<10} ", short_group(g)),
+                        Style::new().fg(Color::Cyan),
+                    )),
+                    None => spans.push(Span::raw(" ".repeat(11))),
+                }
+            }
             spans.push(Span::raw(w.name.clone()));
             if show_dir {
                 spans.push(Span::styled(
@@ -1294,9 +1322,10 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 } else {
                     "o: attach (prefix+d back)"
                 };
+                let group_hint = if app.group_view { "t: ungroup" } else { "t: group" };
                 Line::from(Span::styled(
                     format!(
-                        " enter: focus   {attach_hint}   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   q: quit   m: mosaic"
+                        " enter: focus   {attach_hint}   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
                     ),
                     Style::new().fg(Color::DarkGray),
                 ))

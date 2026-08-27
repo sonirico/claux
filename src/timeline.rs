@@ -110,6 +110,7 @@ mod tests {
             pane_rows: 24,
             transcript: None,
             activity: 0,
+            group: None,
         }
     }
 
