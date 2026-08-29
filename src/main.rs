@@ -195,6 +195,9 @@ struct App {
     /// In-memory history of agent state transitions, used to render the
     /// timeline strip and age label in the list.
     history: timeline::History,
+    /// Lines each list row occupies, 1 or 2, decided by `draw_list` from the
+    /// panel width. Mouse hit-testing needs it to map a row back to a window.
+    row_h: u16,
     /// Percentage width of the list panel versus the preview, adjusted by
     /// dragging the divider between them.
     split_pct: u16,
@@ -248,6 +251,7 @@ impl App {
             cost: cost::CostTracker::new(),
             costs: HashMap::new(),
             history: timeline::History::new(),
+            row_h: 1,
             split_pct: 40,
             dragging: false,
             body_area: Rect::default(),
@@ -1022,6 +1026,7 @@ fn main() -> Result<()> {
                                     } else if let Some(i) = mouse::list_row_at(
                                         app.list_area,
                                         app.list.offset(),
+                                        app.row_h,
                                         m.column,
                                         m.row,
                                         app.windows.len(),
@@ -1201,93 +1206,156 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/// Pads `s` to `w` columns, or truncates it with an ellipsis when it does not
+/// fit. Counts chars, like the rest of the list's column arithmetic.
+fn fit(s: &str, w: usize) -> String {
+    let n = s.chars().count();
+    if n <= w {
+        format!("{s:<w$}")
+    } else if w <= 1 {
+        s.chars().take(w).collect()
+    } else {
+        let mut t: String = s.chars().take(w - 1).collect();
+        t.push('\u{2026}');
+        t
+    }
+}
+
+/// Below this inner width a row splits into two lines so the name gets one to
+/// itself; above it everything stays on a single line.
+const STACK_W: usize = 34;
+
+/// Columns adapt to the panel so the list stays useful when the split is
+/// dragged narrow: the target column is measured instead of a fixed 18 (real
+/// targets are 3-9 wide, so the padding was being paid for by the name), the
+/// state label shortens to four, and the metric columns drop from the right.
+/// The name is the elastic column and sits before the metrics, which keeps
+/// them aligned and makes the name the last thing to be squeezed rather than
+/// the first.
 fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     app.list_area = area;
     let now = now_ms();
     let now_s = now / 1000;
-    // Columns degrade gracefully as the panel narrows: the least essential
-    // ones drop first so the target, state and name always stay readable.
-    let inner_w = area.width.saturating_sub(2);
-    let show_age = inner_w >= 48;
-    let show_ctx = inner_w >= 54;
-    let show_cost = inner_w >= 64;
-    let show_strip = inner_w >= 76;
-    let show_dir = inner_w >= 100;
+    let inner_w = area.width.saturating_sub(2) as usize;
+
+    let target_w = app
+        .windows
+        .iter()
+        .map(|w| w.target.chars().count())
+        .max()
+        .unwrap_or(3)
+        .clamp(3, 18);
+
+    let stacked = inner_w < STACK_W;
+    app.row_h = if stacked { 2 } else { 1 };
+
+    let state_w = if inner_w >= 72 { 11 } else { 5 };
+    let show_age = stacked || inner_w >= 40;
+    let show_ctx = stacked || inner_w >= 46;
+    let show_cost = stacked || inner_w >= 54;
+    let show_strip = !stacked && inner_w >= 66;
+    let show_dir = !stacked && inner_w >= 88;
+
+    let metrics_w = if stacked {
+        0
+    } else {
+        (if show_age { 5 } else { 0 })
+            + (if show_ctx { 5 } else { 0 })
+            + (if show_cost { 9 } else { 0 })
+            + (if show_strip { timeline::BUCKETS + 1 } else { 0 })
+            + (if app.group_view { 11 } else { 0 })
+    };
+    let name_w = inner_w
+        .saturating_sub(2 + target_w + 1 + if stacked { 0 } else { state_w } + metrics_w)
+        .max(3);
+
     let items: Vec<ListItem> = app
         .windows
         .iter()
         .map(|w| {
             let (icon, style) = state_style(w.state);
-            let mut spans = vec![
-                Span::styled(format!("{icon} "), style),
-                Span::raw(format!("{:<18}", w.target)),
-            ];
-            if timeline::is_stuck(w.state, w.activity, now_s) {
-                spans.push(Span::styled(
-                    format!("{:<11}", "stuck!"),
-                    Style::new().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ));
+            let stuck = timeline::is_stuck(w.state, w.activity, now_s);
+            let label_style = if stuck {
+                Style::new().fg(Color::Red).add_modifier(Modifier::BOLD)
             } else {
-                spans.push(Span::styled(format!("{:<11}", w.state.label()), style));
+                style
+            };
+            let state_text = match (stuck, state_w) {
+                (true, _) => "stuck!",
+                (false, 5) => w.state.short_label(),
+                (false, _) => w.state.label(),
+            };
+            let dim = Style::new().fg(Color::DarkGray);
+
+            let mut head = vec![
+                Span::styled(format!("{icon} "), style),
+                Span::raw(format!("{:<target_w$} ", w.target)),
+            ];
+            if !stacked {
+                head.push(Span::styled(fit(state_text, state_w), label_style));
             }
+            head.push(Span::raw(fit(&w.name, name_w)));
+
+            let mut tail = Vec::new();
             if show_age {
                 match app.history.age_ms(&w.pane_id, now) {
-                    Some(a) => spans.push(Span::styled(
+                    Some(a) => tail.push(Span::styled(
                         format!("{:>4} ", timeline::format_age(a)),
-                        Style::new().fg(Color::DarkGray),
+                        dim,
                     )),
-                    None => spans.push(Span::raw(" ".repeat(5))),
+                    None => tail.push(Span::raw(" ".repeat(5))),
                 }
             }
             if show_ctx {
                 if let Some(ctx) = &w.ctx {
-                    spans.push(Span::styled(
-                        format!("{ctx:>3}% "),
-                        Style::new().fg(Color::DarkGray),
-                    ));
+                    tail.push(Span::styled(format!("{ctx:>3}% "), dim));
                 } else {
-                    spans.push(Span::raw("     "));
+                    tail.push(Span::raw("     "));
                 }
             }
             if show_cost {
                 if let Some(c) = app.costs.get(&w.target) {
-                    spans.push(Span::styled(
-                        format!("{:>8} ", format!("${c:.2}")),
-                        Style::new().fg(Color::DarkGray),
-                    ));
+                    tail.push(Span::styled(format!("{:>8} ", format!("${c:.2}")), dim));
                 } else {
-                    spans.push(Span::raw(" ".repeat(9)));
+                    tail.push(Span::raw(" ".repeat(9)));
                 }
             }
             if show_strip {
-                let strip = app.history.strip(&w.pane_id, now);
-                for s in strip {
+                for s in app.history.strip(&w.pane_id, now) {
                     match s {
                         Some(s) => {
-                            spans.push(Span::styled("\u{2588}".to_string(), state_style(s).1))
+                            tail.push(Span::styled("\u{2588}".to_string(), state_style(s).1))
                         }
-                        None => spans.push(Span::raw(" ")),
+                        None => tail.push(Span::raw(" ")),
                     }
                 }
-                spans.push(Span::raw(" "));
+                tail.push(Span::raw(" "));
             }
             if app.group_view {
                 match &w.group {
-                    Some(g) => spans.push(Span::styled(
+                    Some(g) => tail.push(Span::styled(
                         format!("{:<10} ", short_group(g)),
                         Style::new().fg(Color::Cyan),
                     )),
-                    None => spans.push(Span::raw(" ".repeat(11))),
+                    None => tail.push(Span::raw(" ".repeat(11))),
                 }
             }
-            spans.push(Span::raw(w.name.clone()));
             if show_dir {
-                spans.push(Span::styled(
-                    format!("  ({})", w.dir),
-                    Style::new().fg(Color::DarkGray),
-                ));
+                tail.push(Span::styled(format!(" ({})", w.dir), dim));
             }
-            ListItem::new(Line::from(spans))
+
+            if stacked {
+                // The metrics move to their own indented line, where losing the
+                // rightmost ones to a hard cut is fine: they are already
+                // ordered by how much they matter.
+                let mut second = vec![Span::raw("   ".to_string())];
+                second.push(Span::styled(fit(state_text, 5), label_style));
+                second.extend(tail);
+                ListItem::new(vec![Line::from(head), Line::from(second)])
+            } else {
+                head.extend(tail);
+                ListItem::new(Line::from(head))
+            }
         })
         .collect();
 
@@ -1412,4 +1480,30 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         )),
     };
     frame.render_widget(Paragraph::new(line), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fit_pads_a_short_string() {
+        assert_eq!(fit("ssh", 6), "ssh   ");
+    }
+
+    #[test]
+    fn fit_leaves_an_exact_fit_alone() {
+        assert_eq!(fit("dotfiles", 8), "dotfiles");
+    }
+
+    #[test]
+    fn fit_truncates_with_an_ellipsis() {
+        assert_eq!(fit("MB/frontend-demo-planning", 10), "MB/fronte\u{2026}");
+    }
+
+    #[test]
+    fn fit_degenerate_width_does_not_panic() {
+        assert_eq!(fit("dotfiles", 1), "d");
+        assert_eq!(fit("dotfiles", 0), "");
+    }
 }

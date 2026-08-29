@@ -73,6 +73,11 @@ a default), n opens a new window in the selected window's directory, R sends
 `claude --continue` (resume an agent after a reboot/restore), x kills,
 / filters, j/k move, g/G first/last, r forces a refresh, q/esc quits,
 m opens mosaic mode (see below).
+The list adapts to the panel width: the target column is measured rather
+than fixed, the state label shortens, and the metric columns drop from the
+right, so the window name is the last thing to be squeezed instead of the
+first. Below 34 columns each row splits into two lines and the name gets one
+to itself. Drag the divider left and the list stays readable.
 The list auto-refreshes every 500ms; the header shows fleet counters and,
 when any window reports a transcript, a fleet-wide cost total. Each row
 shows its own accumulated USD cost next to the context percentage, when

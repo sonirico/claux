@@ -41,6 +41,20 @@ impl AgentState {
             Self::None => "",
         }
     }
+
+    /// Four-column label for a narrow list panel, where the icon already
+    /// carries the state in colour and shape and the full word does not fit.
+    pub fn short_label(self) -> &'static str {
+        match self {
+            Self::Waiting => "wait",
+            Self::Error => "err",
+            Self::Working => "work",
+            Self::Compacting => "comp",
+            Self::Done => "done",
+            Self::Idle => "idle",
+            Self::None => "",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

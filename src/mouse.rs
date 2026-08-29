@@ -4,7 +4,17 @@
 
 use ratatui::layout::{Position, Rect};
 
-pub fn list_row_at(area: Rect, offset: usize, x: u16, y: u16, len: usize) -> Option<usize> {
+/// `row_h` is how many terminal lines one list row occupies (`draw_list`
+/// stacks a row into two when the panel is narrow), so a click lands on the
+/// window it looks like it lands on in either layout.
+pub fn list_row_at(
+    area: Rect,
+    offset: usize,
+    row_h: u16,
+    x: u16,
+    y: u16,
+    len: usize,
+) -> Option<usize> {
     if area.width < 2 || area.height < 2 {
         return None;
     }
@@ -15,7 +25,7 @@ pub fn list_row_at(area: Rect, offset: usize, x: u16, y: u16, len: usize) -> Opt
     if x < x_min || x > x_max || y < y_min || y > y_max {
         return None;
     }
-    let idx = offset + (y - area.y - 1) as usize;
+    let idx = offset + ((y - area.y - 1) / row_h.max(1)) as usize;
     if idx < len { Some(idx) } else { None }
 }
 
@@ -53,63 +63,77 @@ mod tests {
     #[test]
     fn list_row_at_first_row() {
         let a = area();
-        assert_eq!(list_row_at(a, 0, a.x + 1, a.y + 1, 100), Some(0));
+        assert_eq!(list_row_at(a, 0, 1, a.x + 1, a.y + 1, 100), Some(0));
+    }
+
+    #[test]
+    fn list_row_at_two_line_rows_maps_both_lines_to_one_window() {
+        let a = area();
+        assert_eq!(list_row_at(a, 0, 2, a.x + 1, a.y + 1, 100), Some(0));
+        assert_eq!(list_row_at(a, 0, 2, a.x + 1, a.y + 2, 100), Some(0));
+        assert_eq!(list_row_at(a, 0, 2, a.x + 1, a.y + 3, 100), Some(1));
+    }
+
+    #[test]
+    fn list_row_at_two_line_rows_respect_offset() {
+        let a = area();
+        assert_eq!(list_row_at(a, 3, 2, a.x + 1, a.y + 3, 100), Some(4));
     }
 
     #[test]
     fn list_row_at_respects_offset() {
         let a = area();
-        assert_eq!(list_row_at(a, 3, a.x + 1, a.y + 2, 100), Some(4));
+        assert_eq!(list_row_at(a, 3, 1, a.x + 1, a.y + 2, 100), Some(4));
     }
 
     #[test]
     fn list_row_at_top_border_is_none() {
         let a = area();
-        assert_eq!(list_row_at(a, 0, a.x + 1, a.y, 100), None);
+        assert_eq!(list_row_at(a, 0, 1, a.x + 1, a.y, 100), None);
     }
 
     #[test]
     fn list_row_at_bottom_border_is_none() {
         let a = area();
-        assert_eq!(list_row_at(a, 0, a.x + 1, a.y + a.height - 1, 100), None);
+        assert_eq!(list_row_at(a, 0, 1, a.x + 1, a.y + a.height - 1, 100), None);
     }
 
     #[test]
     fn list_row_at_left_of_area_is_none() {
         let a = area();
-        assert_eq!(list_row_at(a, 0, a.x, a.y + 1, 100), None);
+        assert_eq!(list_row_at(a, 0, 1, a.x, a.y + 1, 100), None);
     }
 
     #[test]
     fn list_row_at_right_of_area_is_none() {
         let a = area();
-        assert_eq!(list_row_at(a, 0, a.x + a.width - 1, a.y + 1, 100), None);
+        assert_eq!(list_row_at(a, 0, 1, a.x + a.width - 1, a.y + 1, 100), None);
     }
 
     #[test]
     fn list_row_at_far_outside_x_is_none() {
         let a = area();
-        assert_eq!(list_row_at(a, 0, a.x + a.width + 10, a.y + 1, 100), None);
+        assert_eq!(list_row_at(a, 0, 1, a.x + a.width + 10, a.y + 1, 100), None);
     }
 
     #[test]
     fn list_row_at_past_len_is_none() {
         let a = area();
-        assert_eq!(list_row_at(a, 0, a.x + 1, a.y + 5, 2), None);
+        assert_eq!(list_row_at(a, 0, 1, a.x + 1, a.y + 5, 2), None);
     }
 
     #[test]
     fn list_row_at_degenerate_width_is_none() {
         let mut a = area();
         a.width = 1;
-        assert_eq!(list_row_at(a, 0, a.x, a.y + 1, 100), None);
+        assert_eq!(list_row_at(a, 0, 1, a.x, a.y + 1, 100), None);
     }
 
     #[test]
     fn list_row_at_degenerate_height_is_none() {
         let mut a = area();
         a.height = 1;
-        assert_eq!(list_row_at(a, 0, a.x + 1, a.y, 100), None);
+        assert_eq!(list_row_at(a, 0, 1, a.x + 1, a.y, 100), None);
     }
 
     fn right_border(a: Rect) -> u16 {
