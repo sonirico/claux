@@ -82,7 +82,13 @@ fn state_style(state: AgentState) -> (char, Style) {
 /// encodes beyond "windows sharing it are related".
 fn short_group(g: &str) -> String {
     let tail = g.rsplit('.').next().unwrap_or(g);
-    tail.chars().rev().take(8).collect::<Vec<_>>().into_iter().rev().collect()
+    tail.chars()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
 }
 
 /// Runs the `CLAUX_GROUP_CLOSE` command with the group tag as its only
@@ -793,8 +799,7 @@ fn main() -> Result<()> {
                                         match (w.group, std::env::var("CLAUX_GROUP_CLOSE")) {
                                             (Some(g), Ok(cmd)) => {
                                                 if pending_close.as_deref() == Some(g.as_str()) {
-                                                    app.flash =
-                                                        Some(run_group_close(&cmd, &g));
+                                                    app.flash = Some(run_group_close(&cmd, &g));
                                                     app.refresh();
                                                 } else {
                                                     app.flash = Some(format!(

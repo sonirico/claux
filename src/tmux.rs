@@ -154,7 +154,8 @@ pub fn sort_grouped(windows: &mut [Window]) {
             .as_ref()
             .map(|g| (0u8, best[g], g.clone()))
             .unwrap_or((1, (AgentState::None, usize::MAX), String::new()));
-        ka.cmp(&kb).then((a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)))
+        ka.cmp(&kb)
+            .then((a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)))
     });
 }
 
@@ -405,8 +406,7 @@ mod tests {
 
     #[test]
     fn parse_line_full_fields() {
-        let line =
-            "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl\t1700000000\tgrp1";
+        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl\t1700000000\tgrp1";
         let window = parse_line(line).unwrap();
         assert_eq!(window.target, "sess:0");
         assert_eq!(window.pane_id, "%3");
