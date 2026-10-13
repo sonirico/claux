@@ -143,32 +143,29 @@ fn parse_line(line: &str) -> Option<Window> {
     })
 }
 
-/// Reorders windows so shared `group` values sit together (ungrouped last),
-/// clusters ordered by their most urgent member, and members within a
-/// cluster keeping their urgency order. Used by the console's group toggle;
-/// the default flat view stays sorted purely by urgency (see `list_windows`).
+impl Window {
+    /// Node of the console's tree view this window hangs from: its
+    /// `@agent_group` tag when a spawner set one, its tmux session otherwise.
+    pub fn tree_key(&self) -> &str {
+        self.group.as_deref().unwrap_or(&self.session)
+    }
+}
+
+/// Reorders windows so those sharing a `tree_key` sit together, clusters
+/// ordered by their most urgent member, and members within a cluster keeping
+/// their urgency order. Used by the console's tree toggle; the default flat
+/// view stays sorted purely by urgency (see `list_windows`).
 pub fn sort_grouped(windows: &mut [Window]) {
     use std::collections::HashMap;
     let mut best: HashMap<String, (AgentState, usize)> = HashMap::new();
     for (i, w) in windows.iter().enumerate() {
-        if let Some(g) = &w.group {
-            best.entry(g.clone())
-                .and_modify(|b| *b = (*b).min((w.state, i)))
-                .or_insert((w.state, i));
-        }
+        best.entry(w.tree_key().to_string())
+            .and_modify(|b| *b = (*b).min((w.state, i)))
+            .or_insert((w.state, i));
     }
     windows.sort_by(|a, b| {
-        let ka = a
-            .group
-            .as_ref()
-            .map(|g| (0u8, best[g], g.clone()))
-            .unwrap_or((1, (AgentState::None, usize::MAX), String::new()));
-        let kb = b
-            .group
-            .as_ref()
-            .map(|g| (0u8, best[g], g.clone()))
-            .unwrap_or((1, (AgentState::None, usize::MAX), String::new()));
-        ka.cmp(&kb)
+        (best[a.tree_key()], a.tree_key())
+            .cmp(&(best[b.tree_key()], b.tree_key()))
             .then((a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)))
     });
 }

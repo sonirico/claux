@@ -34,7 +34,7 @@ use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, List, ListItem, ListState, Paragraph};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use control::ControlClient;
@@ -121,6 +121,50 @@ enum Mode {
     Mosaic,
 }
 
+/// One line of the agent list: a tree node heading its windows (tree view
+/// only), or a window, as an index into `App::windows`.
+#[derive(Debug, PartialEq)]
+enum Row {
+    Header(String),
+    Window(usize),
+}
+
+/// Lays `windows` out as list rows. Flat, one row per window. As a tree,
+/// a header opens every run of windows sharing a `tree_key` (the caller
+/// sorts them together first) and a collapsed node keeps only its header.
+fn build_rows(windows: &[Window], tree: bool, collapsed: &HashSet<String>) -> Vec<Row> {
+    let mut rows = Vec::new();
+    for (i, w) in windows.iter().enumerate() {
+        let key = w.tree_key();
+        if tree && (i == 0 || windows[i - 1].tree_key() != key) {
+            rows.push(Row::Header(key.to_string()));
+        }
+        if !tree || !collapsed.contains(key) {
+            rows.push(Row::Window(i));
+        }
+    }
+    rows
+}
+
+/// How many of `windows` sit in each attention-worthy state, most urgent
+/// first, leaving out states nobody is in.
+fn state_counts(windows: &[&Window]) -> Vec<(AgentState, usize)> {
+    let mut out: Vec<(AgentState, usize)> = Vec::new();
+    for s in [
+        AgentState::Waiting,
+        AgentState::Error,
+        AgentState::Working,
+        AgentState::Compacting,
+        AgentState::Done,
+    ] {
+        let n = windows.iter().filter(|w| w.state == s).count();
+        if n > 0 {
+            out.push((s, n));
+        }
+    }
+    out
+}
+
 /// One cell of the mosaic grid: the window it previews, its live vt100
 /// screen (fed from a shared control client's `%output`), and an error to
 /// show instead when the client or the initial capture failed.
@@ -174,9 +218,13 @@ struct App {
     prev_states: HashMap<String, AgentState>,
     /// Whether desktop notifications are enabled (`--no-notify` disables).
     notify: bool,
-    /// Toggled with `t`: cluster windows by `@agent_group` instead of the
-    /// default flat urgency sort.
+    /// What the list shows, row by row; `list`'s selection indexes this.
+    rows: Vec<Row>,
+    /// Toggled with `t`: show windows as a tree under their `tree_key`
+    /// (`@agent_group`, else session) instead of the flat urgency sort.
     group_view: bool,
+    /// Tree nodes folded down to their header.
+    collapsed: HashSet<String>,
     /// Group tag armed by a first `X` press; a second `X` on the same group
     /// runs the `CLAUX_GROUP_CLOSE` command. Any other key disarms it.
     confirm_close: Option<String>,
@@ -243,7 +291,9 @@ impl App {
             last_preview_inner: Rect::default(),
             prev_states: HashMap::new(),
             notify,
+            rows: Vec::new(),
             group_view: false,
+            collapsed: HashSet::new(),
             confirm_close: None,
             mosaic_cells: Vec::new(),
             mosaic_clients: Vec::new(),
@@ -262,7 +312,36 @@ impl App {
     }
 
     fn selected(&self) -> Option<&Window> {
-        self.windows.get(self.list.selected()?)
+        match self.rows.get(self.list.selected()?)? {
+            Row::Window(i) => self.windows.get(*i),
+            Row::Header(_) => None,
+        }
+    }
+
+    fn selected_header(&self) -> Option<&str> {
+        match self.rows.get(self.list.selected()?)? {
+            Row::Header(k) => Some(k),
+            Row::Window(_) => None,
+        }
+    }
+
+    /// Folds or unfolds tree node `key` and moves the selection onto its
+    /// header, the one row sure to survive the fold.
+    fn set_collapsed(&mut self, key: &str, collapsed: bool) {
+        if collapsed {
+            self.collapsed.insert(key.to_string());
+        } else {
+            self.collapsed.remove(key);
+        }
+        self.apply_filter();
+        if let Some(i) = self
+            .rows
+            .iter()
+            .position(|r| *r == Row::Header(key.to_string()))
+        {
+            self.list.select(Some(i));
+            self.refresh_preview();
+        }
     }
 
     fn refresh(&mut self) {
@@ -304,8 +383,10 @@ impl App {
     }
 
     fn apply_filter(&mut self) {
-        // Keep the selection pinned to the same window across re-sorts.
-        let keep = self.selected().map(|w| w.target.clone());
+        // Keep the selection pinned to the same window (or header) across
+        // re-sorts.
+        let keep_target = self.selected().map(|w| w.target.clone());
+        let keep_header = self.selected_header().map(str::to_string);
         let needle = self.filter.to_lowercase();
         self.windows = self
             .all
@@ -321,13 +402,19 @@ impl App {
         if self.group_view {
             tmux::sort_grouped(&mut self.windows);
         }
-        let idx = keep
-            .and_then(|t| self.windows.iter().position(|w| w.target == t))
+        self.rows = build_rows(&self.windows, self.group_view, &self.collapsed);
+        let idx = self
+            .rows
+            .iter()
+            .position(|r| match r {
+                Row::Window(i) => keep_target.as_deref() == Some(self.windows[*i].target.as_str()),
+                Row::Header(k) => keep_header.as_deref() == Some(k.as_str()),
+            })
             .unwrap_or(0);
-        if self.windows.is_empty() {
+        if self.rows.is_empty() {
             self.list.select(None);
         } else {
-            self.list.select(Some(idx.min(self.windows.len() - 1)));
+            self.list.select(Some(idx.min(self.rows.len() - 1)));
         }
         self.refresh_preview();
     }
@@ -359,10 +446,10 @@ impl App {
     }
 
     fn select_delta(&mut self, delta: i32) {
-        if self.windows.is_empty() {
+        if self.rows.is_empty() {
             return;
         }
-        let len = self.windows.len() as i32;
+        let len = self.rows.len() as i32;
         let cur = self.list.selected().unwrap_or(0) as i32;
         let next = (cur + delta).rem_euclid(len);
         self.list.select(Some(next as usize));
@@ -370,20 +457,7 @@ impl App {
     }
 
     fn counts(&self) -> Vec<(AgentState, usize)> {
-        let mut out: Vec<(AgentState, usize)> = Vec::new();
-        for s in [
-            AgentState::Waiting,
-            AgentState::Error,
-            AgentState::Working,
-            AgentState::Compacting,
-            AgentState::Done,
-        ] {
-            let n = self.all.iter().filter(|w| w.state == s).count();
-            if n > 0 {
-                out.push((s, n));
-            }
-        }
-        out
+        state_counts(&self.all.iter().collect::<Vec<_>>())
     }
 
     /// Enter focus mode on `w`: make sure a control client is attached to
@@ -770,14 +844,14 @@ fn main() -> Result<()> {
                                 KeyCode::Char('j') | KeyCode::Down => app.select_delta(1),
                                 KeyCode::Char('k') | KeyCode::Up => app.select_delta(-1),
                                 KeyCode::Char('g') | KeyCode::Home => {
-                                    if !app.windows.is_empty() {
+                                    if !app.rows.is_empty() {
                                         app.list.select(Some(0));
                                         app.refresh_preview();
                                     }
                                 }
                                 KeyCode::Char('G') | KeyCode::End => {
-                                    if !app.windows.is_empty() {
-                                        app.list.select(Some(app.windows.len() - 1));
+                                    if !app.rows.is_empty() {
+                                        app.list.select(Some(app.rows.len() - 1));
                                         app.refresh_preview();
                                     }
                                 }
@@ -785,6 +859,26 @@ fn main() -> Result<()> {
                                 KeyCode::Char('t') => {
                                     app.group_view = !app.group_view;
                                     app.apply_filter();
+                                }
+                                KeyCode::Char('h') | KeyCode::Left if app.group_view => {
+                                    let key =
+                                        app.selected_header().map(str::to_string).or_else(|| {
+                                            app.selected().map(|w| w.tree_key().to_string())
+                                        });
+                                    if let Some(k) = key {
+                                        app.set_collapsed(&k, true);
+                                    }
+                                }
+                                KeyCode::Char('l') | KeyCode::Right => {
+                                    if let Some(k) = app.selected_header().map(str::to_string) {
+                                        app.set_collapsed(&k, false);
+                                    }
+                                }
+                                KeyCode::Char(' ') => {
+                                    if let Some(k) = app.selected_header().map(str::to_string) {
+                                        let fold = !app.collapsed.contains(&k);
+                                        app.set_collapsed(&k, fold);
+                                    }
                                 }
                                 KeyCode::Char('/') => app.mode = Mode::Filter,
                                 KeyCode::Char('i') => {
@@ -799,8 +893,17 @@ fn main() -> Result<()> {
                                     }
                                 }
                                 KeyCode::Char('X') => {
-                                    if let Some(w) = app.selected().cloned() {
-                                        match (w.group, std::env::var("CLAUX_GROUP_CLOSE")) {
+                                    let header = app.selected_header().map(str::to_string);
+                                    let group = match header {
+                                        Some(k) => app
+                                            .windows
+                                            .iter()
+                                            .find(|w| w.tree_key() == k)
+                                            .and_then(|w| w.group.clone()),
+                                        None => app.selected().and_then(|w| w.group.clone()),
+                                    };
+                                    if app.list.selected().is_some() {
+                                        match (group, std::env::var("CLAUX_GROUP_CLOSE")) {
                                             (Some(g), Ok(cmd)) => {
                                                 if pending_close.as_deref() == Some(g.as_str()) {
                                                     app.flash = Some(run_group_close(&cmd, &g));
@@ -814,8 +917,7 @@ fn main() -> Result<()> {
                                                 }
                                             }
                                             (None, _) => {
-                                                app.flash =
-                                                    Some("no group on this window".to_string());
+                                                app.flash = Some("no group here".to_string());
                                             }
                                             (_, Err(_)) => {
                                                 app.flash =
@@ -857,7 +959,10 @@ fn main() -> Result<()> {
                                     }
                                 }
                                 KeyCode::Enter => {
-                                    if let Some(w) = app.selected().cloned() {
+                                    if let Some(k) = app.selected_header().map(str::to_string) {
+                                        let fold = !app.collapsed.contains(&k);
+                                        app.set_collapsed(&k, fold);
+                                    } else if let Some(w) = app.selected().cloned() {
                                         app.mode = Mode::Focus;
                                         app.enter_focus(&w);
                                         if app.vt.is_none() {
@@ -953,9 +1058,9 @@ fn main() -> Result<()> {
                                         .map(|c| c.window.clone())
                                     {
                                         if let Some(idx) = app
-                                            .windows
+                                            .rows
                                             .iter()
-                                            .position(|w| w.target == window.target)
+                                            .position(|r| matches!(r, Row::Window(i) if app.windows[*i].target == window.target))
                                         {
                                             app.list.select(Some(idx));
                                         }
@@ -989,9 +1094,9 @@ fn main() -> Result<()> {
                                                 .map(|c| c.window.clone())
                                             {
                                                 if let Some(idx) = app
-                                                    .windows
+                                                    .rows
                                                     .iter()
-                                                    .position(|w| w.target == window.target)
+                                                    .position(|r| matches!(r, Row::Window(i) if app.windows[*i].target == window.target))
                                                 {
                                                     app.list.select(Some(idx));
                                                 }
@@ -1029,10 +1134,15 @@ fn main() -> Result<()> {
                                         app.row_h,
                                         m.column,
                                         m.row,
-                                        app.windows.len(),
+                                        app.rows.len(),
                                     ) {
                                         if app.list.selected() == Some(i) {
-                                            if let Some(w) = app.selected().cloned() {
+                                            if let Some(k) =
+                                                app.selected_header().map(str::to_string)
+                                            {
+                                                let fold = !app.collapsed.contains(&k);
+                                                app.set_collapsed(&k, fold);
+                                            } else if let Some(w) = app.selected().cloned() {
                                                 app.mode = Mode::Focus;
                                                 app.enter_focus(&w);
                                                 if app.vt.is_none() {
@@ -1238,10 +1348,21 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
     let now_s = now / 1000;
     let inner_w = area.width.saturating_sub(2) as usize;
 
+    let tree = app.group_view;
+    // In the tree a session node already names the session, so its windows
+    // show only `:index`; a group node can span sessions and keeps targets.
+    let target_of = |w: &Window| {
+        if tree && w.group.is_none() {
+            format!(":{}", w.index)
+        } else {
+            w.target.clone()
+        }
+    };
+    let indent = if tree { "  " } else { "" };
     let target_w = app
         .windows
         .iter()
-        .map(|w| w.target.chars().count())
+        .map(|w| target_of(w).chars().count())
         .max()
         .unwrap_or(3)
         .clamp(3, 18);
@@ -1263,16 +1384,21 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             + (if show_ctx { 5 } else { 0 })
             + (if show_cost { 9 } else { 0 })
             + (if show_strip { timeline::BUCKETS + 1 } else { 0 })
-            + (if app.group_view { 11 } else { 0 })
     };
     let name_w = inner_w
-        .saturating_sub(2 + target_w + 1 + if stacked { 0 } else { state_w } + metrics_w)
+        .saturating_sub(
+            indent.len() + 2 + target_w + 1 + if stacked { 0 } else { state_w } + metrics_w,
+        )
         .max(3);
 
     let items: Vec<ListItem> = app
-        .windows
+        .rows
         .iter()
-        .map(|w| {
+        .map(|row| {
+            let w = match row {
+                Row::Window(i) => &app.windows[*i],
+                Row::Header(k) => return draw_tree_header(app, k, stacked),
+            };
             let (icon, style) = state_style(w.state);
             let stuck = timeline::is_stuck(w.state, w.activity, now_s);
             let label_style = if stuck {
@@ -1288,8 +1414,9 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             let dim = Style::new().fg(Color::DarkGray);
 
             let mut head = vec![
+                Span::raw(indent),
                 Span::styled(format!("{icon} "), style),
-                Span::raw(format!("{:<target_w$} ", w.target)),
+                Span::raw(format!("{:<target_w$} ", target_of(w))),
             ];
             if !stacked {
                 head.push(Span::styled(fit(state_text, state_w), label_style));
@@ -1331,15 +1458,6 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 }
                 tail.push(Span::raw(" "));
             }
-            if app.group_view {
-                match &w.group {
-                    Some(g) => tail.push(Span::styled(
-                        format!("{:<10} ", short_group(g)),
-                        Style::new().fg(Color::Cyan),
-                    )),
-                    None => tail.push(Span::raw(" ".repeat(11))),
-                }
-            }
             if show_dir {
                 tail.push(Span::styled(format!(" ({})", w.dir), dim));
             }
@@ -1368,6 +1486,41 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         );
     frame.render_stateful_widget(list, area, &mut app.list);
+}
+
+/// One tree node's header row: fold marker, node name, window count, how many
+/// of its windows sit in each state, and their summed cost. Spans as many
+/// lines as a window row so mouse hit-testing stays uniform.
+fn draw_tree_header(app: &App, key: &str, stacked: bool) -> ListItem<'static> {
+    let ws: Vec<&Window> = app.windows.iter().filter(|w| w.tree_key() == key).collect();
+    let dim = Style::new().fg(Color::DarkGray);
+    let marker = if app.collapsed.contains(key) {
+        '\u{25b8}'
+    } else {
+        '\u{25be}'
+    };
+    let mut spans = vec![
+        Span::styled(format!("{marker} "), dim),
+        Span::styled(
+            key.to_string(),
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!(" {}", ws.len()), dim),
+    ];
+    for (state, n) in state_counts(&ws) {
+        let (icon, style) = state_style(state);
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(format!("{icon} {n}"), style));
+    }
+    let total: f64 = ws.iter().filter_map(|w| app.costs.get(&w.target)).sum();
+    if total > 0.0 {
+        spans.push(Span::styled(format!("  ${total:.2}"), dim));
+    }
+    let mut lines = vec![Line::from(spans)];
+    if stacked {
+        lines.push(Line::default());
+    }
+    ListItem::new(lines)
 }
 
 /// Draws the preview panel border, then either the vt100 control-mode
@@ -1449,9 +1602,9 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                     "o: attach (prefix+d back)"
                 };
                 let group_hint = if app.group_view {
-                    "t: ungroup   X: close group"
+                    "t: flat   h/l/space: fold   X: close group"
                 } else {
-                    "t: group"
+                    "t: tree"
                 };
                 Line::from(Span::styled(
                     format!(
@@ -1485,6 +1638,87 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn new_test_window(session: &str, index: u32, group: Option<&str>) -> Window {
+        Window {
+            target: format!("{session}:{index}"),
+            session: session.to_string(),
+            index,
+            name: String::new(),
+            dir: String::new(),
+            state: AgentState::Idle,
+            ctx: None,
+            pane_id: String::new(),
+            pane_cols: 0,
+            pane_rows: 0,
+            transcript: None,
+            activity: 0,
+            group: group.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn build_rows_flat_lists_every_window() {
+        let windows = [new_test_window("a", 1, None), new_test_window("b", 1, None)];
+
+        let rows = build_rows(&windows, false, &HashSet::new());
+
+        assert_eq!(rows, vec![Row::Window(0), Row::Window(1)]);
+    }
+
+    #[test]
+    fn build_rows_tree_heads_each_session() {
+        let windows = [
+            new_test_window("a", 1, None),
+            new_test_window("a", 2, None),
+            new_test_window("b", 1, None),
+        ];
+
+        let rows = build_rows(&windows, true, &HashSet::new());
+
+        assert_eq!(
+            rows,
+            vec![
+                Row::Header("a".to_string()),
+                Row::Window(0),
+                Row::Window(1),
+                Row::Header("b".to_string()),
+                Row::Window(2),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_rows_tree_prefers_the_group_tag_over_the_session() {
+        let windows = [
+            new_test_window("a", 1, Some("g")),
+            new_test_window("b", 1, Some("g")),
+        ];
+
+        let rows = build_rows(&windows, true, &HashSet::new());
+
+        assert_eq!(
+            rows,
+            vec![Row::Header("g".to_string()), Row::Window(0), Row::Window(1)]
+        );
+    }
+
+    #[test]
+    fn build_rows_tree_hides_the_windows_of_a_collapsed_node() {
+        let windows = [new_test_window("a", 1, None), new_test_window("b", 1, None)];
+        let collapsed = HashSet::from(["a".to_string()]);
+
+        let rows = build_rows(&windows, true, &collapsed);
+
+        assert_eq!(
+            rows,
+            vec![
+                Row::Header("a".to_string()),
+                Row::Header("b".to_string()),
+                Row::Window(1),
+            ]
+        );
+    }
 
     #[test]
     fn fit_pads_a_short_string() {
