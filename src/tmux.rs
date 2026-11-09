@@ -87,6 +87,9 @@ pub struct Window {
     /// `CLAUDING_TASK_ID`) via the hook-owned `@agent_group` window option.
     /// `None` when unset; claux stays agnostic of what the tag means.
     pub group: Option<String>,
+    /// Pane id of the window this one was forked from (`f`), published as
+    /// the `@agent_parent` window option. The tree view nests it there.
+    pub parent: Option<String>,
 }
 
 fn tmux(args: &[&str]) -> Result<String> {
@@ -105,7 +108,7 @@ fn tmux(args: &[&str]) -> Result<String> {
 }
 
 pub fn list_windows() -> Result<Vec<Window>> {
-    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}\t#{@agent_group}";
+    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}\t#{@agent_group}\t#{@agent_parent}";
     let out = tmux(&["list-windows", "-a", "-F", fmt])?;
     let mut windows: Vec<Window> = out.lines().filter_map(parse_line).collect();
     windows.sort_by(|a, b| (a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)));
@@ -126,6 +129,7 @@ fn parse_line(line: &str) -> Option<Window> {
     let transcript = f.next().filter(|s| !s.is_empty()).map(str::to_string);
     let activity: u64 = f.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let group = f.next().filter(|s| !s.is_empty()).map(str::to_string);
+    let parent = f.next().filter(|s| !s.is_empty()).map(str::to_string);
     Some(Window {
         target: format!("{session}:{index}"),
         session,
@@ -140,6 +144,7 @@ fn parse_line(line: &str) -> Option<Window> {
         transcript,
         activity,
         group,
+        parent,
     })
 }
 
@@ -326,9 +331,47 @@ pub fn new_window(session: &str, dir_of: &str) -> Result<String> {
     Ok(target.trim().to_string())
 }
 
+/// New window beside `src` running a fork of its Claude session: same
+/// directory, name suffixed `~fork`, same `@agent_group`, `@agent_parent`
+/// pointing back at `src`. The fork gets its
+/// own session id, so the original keeps going untouched. Returns the new
+/// window's target like `new_window`.
+pub fn fork_window(src: &Window) -> Result<String> {
+    let Some(id) = src.transcript.as_deref().and_then(session_id) else {
+        bail!("no transcript to fork in {}", src.target);
+    };
+    let target = new_window(&src.session, &src.target)?;
+    tmux(&[
+        "rename-window",
+        "-t",
+        &target,
+        &format!("{}~fork", src.name),
+    ])?;
+    if let Some(group) = &src.group {
+        tmux(&["set-window-option", "-t", &target, "@agent_group", group])?;
+    }
+    tmux(&[
+        "set-window-option",
+        "-t",
+        &target,
+        "@agent_parent",
+        &src.pane_id,
+    ])?;
+    send_line(&target, &format!("claude --resume {id} --fork-session"))?;
+    Ok(target)
+}
+
+/// Claude Code names each transcript `<session-id>.jsonl`.
+fn session_id(transcript: &str) -> Option<&str> {
+    std::path::Path::new(transcript)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{key_args, parse_line};
+    use super::{key_args, parse_line, session_id};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn args(code: KeyCode, mods: KeyModifiers) -> Option<Vec<String>> {
@@ -416,8 +459,21 @@ mod tests {
     }
 
     #[test]
+    fn session_id_is_transcript_stem() {
+        assert_eq!(
+            session_id("/home/u/.claude/projects/p/03cc778c-6175.jsonl"),
+            Some("03cc778c-6175")
+        );
+    }
+
+    #[test]
+    fn session_id_of_empty_path_is_none() {
+        assert_eq!(session_id(""), None);
+    }
+
+    #[test]
     fn parse_line_full_fields() {
-        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl\t1700000000\tgrp1";
+        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl\t1700000000\tgrp1\t%1";
         let window = parse_line(line).unwrap();
         assert_eq!(window.target, "sess:0");
         assert_eq!(window.pane_id, "%3");
@@ -426,6 +482,7 @@ mod tests {
         assert_eq!(window.transcript, Some("/tmp/transcript.jsonl".to_string()));
         assert_eq!(window.activity, 1700000000);
         assert_eq!(window.group, Some("grp1".to_string()));
+        assert_eq!(window.parent, Some("%1".to_string()));
     }
 
     #[test]

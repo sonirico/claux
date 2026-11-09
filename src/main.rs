@@ -131,7 +131,8 @@ enum Row {
 
 /// Lays `windows` out as list rows. Flat, one row per window. As a tree,
 /// a header opens every run of windows sharing a `tree_key` (the caller
-/// sorts them together first) and a collapsed node keeps only its header.
+/// sorts them together first), each fork follows its parent window, and a
+/// collapsed node keeps only its header.
 fn build_rows(windows: &[Window], tree: bool, collapsed: &HashSet<String>) -> Vec<Row> {
     let mut rows = Vec::new();
     for (i, w) in windows.iter().enumerate() {
@@ -139,11 +140,43 @@ fn build_rows(windows: &[Window], tree: bool, collapsed: &HashSet<String>) -> Ve
         if tree && (i == 0 || windows[i - 1].tree_key() != key) {
             rows.push(Row::Header(key.to_string()));
         }
-        if !tree || !collapsed.contains(key) {
+        if !tree {
             rows.push(Row::Window(i));
+        } else if !collapsed.contains(key) && parent_of(windows, i).is_none() {
+            push_subtree(windows, i, &mut rows);
         }
     }
     rows
+}
+
+/// Pushes window `i` and then, depth first, the windows forked from it.
+fn push_subtree(windows: &[Window], i: usize, rows: &mut Vec<Row>) {
+    rows.push(Row::Window(i));
+    for j in 0..windows.len() {
+        if parent_of(windows, j) == Some(i) {
+            push_subtree(windows, j, rows);
+        }
+    }
+}
+
+/// Index of the window `i` was forked from, when that window is still open
+/// under the same tree node; a fork whose parent is gone stands on its own.
+fn parent_of(windows: &[Window], i: usize) -> Option<usize> {
+    let w = &windows[i];
+    let pane = w.parent.as_deref()?;
+    windows
+        .iter()
+        .position(|p| p.pane_id == pane && p.tree_key() == w.tree_key())
+}
+
+/// How many forks deep window `i` sits under its tree node.
+fn fork_depth(windows: &[Window], mut i: usize) -> usize {
+    let mut depth = 0;
+    while let Some(p) = parent_of(windows, i) {
+        depth += 1;
+        i = p;
+    }
+    depth
 }
 
 /// How many of `windows` sit in each attention-worthy state, most urgent
@@ -935,9 +968,14 @@ fn main() -> Result<()> {
                                             };
                                     }
                                 }
-                                KeyCode::Char('n') => {
+                                KeyCode::Char('n') | KeyCode::Char('f') => {
                                     if let Some(w) = app.selected().cloned() {
-                                        match tmux::new_window(&w.session, &w.target) {
+                                        let spawned = if key.code == KeyCode::Char('f') {
+                                            tmux::fork_window(&w)
+                                        } else {
+                                            tmux::new_window(&w.session, &w.target)
+                                        };
+                                        match spawned {
                                             Ok(target) => {
                                                 if inside {
                                                     if let Err(e) = tmux::switch(&w.session) {
@@ -1395,8 +1433,8 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
         .rows
         .iter()
         .map(|row| {
-            let w = match row {
-                Row::Window(i) => &app.windows[*i],
+            let (w, depth) = match row {
+                Row::Window(i) => (&app.windows[*i], fork_depth(&app.windows, *i)),
                 Row::Header(k) => return draw_tree_header(app, k, stacked),
             };
             let (icon, style) = state_style(w.state);
@@ -1421,7 +1459,11 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             if !stacked {
                 head.push(Span::styled(fit(state_text, state_w), label_style));
             }
-            head.push(Span::raw(fit(&w.name, name_w)));
+            let name = match depth {
+                0 => w.name.clone(),
+                d => format!("{}`- {}", "  ".repeat(d - 1), w.name),
+            };
+            head.push(Span::raw(fit(&name, name_w)));
 
             let mut tail = Vec::new();
             if show_age {
@@ -1608,7 +1650,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 Line::from(Span::styled(
                     format!(
-                        " enter: focus   {attach_hint}   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
+                        " enter: focus   {attach_hint}   i: send input   n: new window   f: fork claude   R: resume claude   x: kill   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
                     ),
                     Style::new().fg(Color::DarkGray),
                 ))
@@ -1654,6 +1696,7 @@ mod tests {
             transcript: None,
             activity: 0,
             group: group.map(str::to_string),
+            parent: None,
         }
     }
 
@@ -1701,6 +1744,67 @@ mod tests {
             rows,
             vec![Row::Header("g".to_string()), Row::Window(0), Row::Window(1)]
         );
+    }
+
+    fn new_test_fork(session: &str, index: u32, parent_pane: &str) -> Window {
+        Window {
+            parent: Some(parent_pane.to_string()),
+            ..new_test_window(session, index, None)
+        }
+    }
+
+    #[test]
+    fn build_rows_tree_nests_a_fork_under_its_parent() {
+        let mut parent = new_test_window("a", 2, None);
+        parent.pane_id = "%2".to_string();
+        let windows = [
+            new_test_fork("a", 3, "%2"),
+            new_test_window("a", 1, None),
+            parent,
+        ];
+
+        let rows = build_rows(&windows, true, &HashSet::new());
+
+        assert_eq!(
+            rows,
+            vec![
+                Row::Header("a".to_string()),
+                Row::Window(1),
+                Row::Window(2),
+                Row::Window(0),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_rows_tree_keeps_an_orphan_fork_as_a_root() {
+        let windows = [new_test_fork("a", 3, "%9")];
+
+        let rows = build_rows(&windows, true, &HashSet::new());
+
+        assert_eq!(rows, vec![Row::Header("a".to_string()), Row::Window(0)]);
+    }
+
+    #[test]
+    fn build_rows_flat_ignores_fork_parents() {
+        let mut parent = new_test_window("a", 2, None);
+        parent.pane_id = "%2".to_string();
+        let windows = [new_test_fork("a", 3, "%2"), parent];
+
+        let rows = build_rows(&windows, false, &HashSet::new());
+
+        assert_eq!(rows, vec![Row::Window(0), Row::Window(1)]);
+    }
+
+    #[test]
+    fn fork_depth_counts_nested_forks() {
+        let mut root = new_test_window("a", 1, None);
+        root.pane_id = "%1".to_string();
+        let mut child = new_test_fork("a", 2, "%1");
+        child.pane_id = "%2".to_string();
+        let windows = [root, child, new_test_fork("a", 3, "%2")];
+
+        assert_eq!(fork_depth(&windows, 2), 2);
     }
 
     #[test]
