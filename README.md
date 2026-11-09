@@ -71,7 +71,8 @@ to the window / attaches (the old enter behavior), i types a line into the
 selected agent's pane without attaching (empty line = just Enter, to accept
 a default), n opens a new window in the selected window's directory, f
 forks the selected agent's Claude session into a new window (`name~fork`,
-same directory and group, the original keeps running), R sends
+same directory and group, nested under its parent in the tree view, the
+original keeps running), R sends
 `claude --continue` (resume an agent after a reboot/restore), x kills,
 / filters, j/k move, g/G first/last, r forces a refresh, q/esc quits,
 m opens mosaic mode (see below).
