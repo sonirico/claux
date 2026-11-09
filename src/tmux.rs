@@ -326,9 +326,39 @@ pub fn new_window(session: &str, dir_of: &str) -> Result<String> {
     Ok(target.trim().to_string())
 }
 
+/// New window beside `src` running a fork of its Claude session: same
+/// directory, name suffixed `~fork`, same `@agent_group`. The fork gets its
+/// own session id, so the original keeps going untouched. Returns the new
+/// window's target like `new_window`.
+pub fn fork_window(src: &Window) -> Result<String> {
+    let Some(id) = src.transcript.as_deref().and_then(session_id) else {
+        bail!("no transcript to fork in {}", src.target);
+    };
+    let target = new_window(&src.session, &src.target)?;
+    tmux(&[
+        "rename-window",
+        "-t",
+        &target,
+        &format!("{}~fork", src.name),
+    ])?;
+    if let Some(group) = &src.group {
+        tmux(&["set-window-option", "-t", &target, "@agent_group", group])?;
+    }
+    send_line(&target, &format!("claude --resume {id} --fork-session"))?;
+    Ok(target)
+}
+
+/// Claude Code names each transcript `<session-id>.jsonl`.
+fn session_id(transcript: &str) -> Option<&str> {
+    std::path::Path::new(transcript)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{key_args, parse_line};
+    use super::{key_args, parse_line, session_id};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn args(code: KeyCode, mods: KeyModifiers) -> Option<Vec<String>> {
@@ -413,6 +443,19 @@ mod tests {
             args(KeyCode::Up, KeyModifiers::CONTROL),
             Some(vec!["C-Up".to_string()])
         );
+    }
+
+    #[test]
+    fn session_id_is_transcript_stem() {
+        assert_eq!(
+            session_id("/home/u/.claude/projects/p/03cc778c-6175.jsonl"),
+            Some("03cc778c-6175")
+        );
+    }
+
+    #[test]
+    fn session_id_of_empty_path_is_none() {
+        assert_eq!(session_id(""), None);
     }
 
     #[test]

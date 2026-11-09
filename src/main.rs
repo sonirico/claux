@@ -935,9 +935,14 @@ fn main() -> Result<()> {
                                             };
                                     }
                                 }
-                                KeyCode::Char('n') => {
+                                KeyCode::Char('n') | KeyCode::Char('f') => {
                                     if let Some(w) = app.selected().cloned() {
-                                        match tmux::new_window(&w.session, &w.target) {
+                                        let spawned = if key.code == KeyCode::Char('f') {
+                                            tmux::fork_window(&w)
+                                        } else {
+                                            tmux::new_window(&w.session, &w.target)
+                                        };
+                                        match spawned {
                                             Ok(target) => {
                                                 if inside {
                                                     if let Err(e) = tmux::switch(&w.session) {
@@ -1608,7 +1613,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 Line::from(Span::styled(
                     format!(
-                        " enter: focus   {attach_hint}   i: send input   n: new window   R: resume claude   x: kill   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
+                        " enter: focus   {attach_hint}   i: send input   n: new window   f: fork claude   R: resume claude   x: kill   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
                     ),
                     Style::new().fg(Color::DarkGray),
                 ))
