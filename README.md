@@ -93,7 +93,8 @@ below). The mouse works too (see Mouse below).
 Click a row in the list to select it, click it again to enter focus mode
 (the same gesture works on a mosaic cell). The scroll wheel moves the
 selection up and down. Drag the border between the list and the preview to
-resize the split. In focus mode the mouse is ignored; use the keyboard.
+resize the split. In focus mode a click on the list leaves focus, like
+ctrl-q; any other mouse input is ignored.
 
 ## Focus mode (control mode)
 
