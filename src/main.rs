@@ -249,7 +249,7 @@ struct App {
     /// Per-window state as of the last refresh, keyed by `pane_id`, used to
     /// detect transitions worth a desktop notification.
     prev_states: HashMap<String, AgentState>,
-    /// Whether desktop notifications are enabled (`--no-notify` disables).
+    /// Whether state-change notifications are enabled (`--no-notify` disables).
     notify: bool,
     /// What the list shows, row by row; `list`'s selection indexes this.
     rows: Vec<Row>,
@@ -390,10 +390,10 @@ impl App {
         }
         if self.notify {
             for (target, name, state) in notify::transitions(&self.prev_states, &self.all) {
-                notify::send(
-                    &format!("claux: {}", state.label()),
-                    &format!("{target}  {name}"),
-                );
+                let msg = format!("claux: {}  {target}  {name}", state.label());
+                // Best effort: a failed tmux message must never take down the TUI.
+                let _ = tmux::display_message(&msg);
+                self.flash = Some(msg);
             }
         }
         self.prev_states = self

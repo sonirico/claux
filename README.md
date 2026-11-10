@@ -123,8 +123,8 @@ matching the pane's real width, same as before.
 ## Notifications
 
 When a window's agent state transitions into waiting, error or done, claux
-fires a best-effort desktop notification (`osascript` on macOS, `notify-send`
-elsewhere). Other transitions (working, compacting, idle) stay silent to
+shows a short message in the status line of every attached tmux client
+(`display-message`) and in its own footer. There are no desktop popups. Other transitions (working, compacting, idle) stay silent to
 avoid churn. Pass `--no-notify` to disable notifications entirely. Since the
 fleet poll pauses while in focus mode, no notifications fire during focus.
 
