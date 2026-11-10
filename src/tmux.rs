@@ -232,6 +232,14 @@ pub fn kill(target: &str) -> Result<()> {
 
 /// Type a line into the window's active pane without attaching: literal
 /// text first, then Enter. Empty text sends just Enter (accept a default).
+/// Show `msg` in the status line of every attached tmux client.
+pub fn display_message(msg: &str) -> Result<()> {
+    for client in tmux(&["list-clients", "-F", "#{client_name}"])?.lines() {
+        tmux(&["display-message", "-c", client, msg])?;
+    }
+    Ok(())
+}
+
 pub fn send_line(target: &str, text: &str) -> Result<()> {
     if !text.is_empty() {
         tmux(&["send-keys", "-l", "-t", target, text])?;

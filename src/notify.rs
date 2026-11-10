@@ -1,37 +1,8 @@
-//! Best-effort desktop notification delivery for agent state transitions.
-//! Delivery is fire-and-forget: spawned processes are never waited on and
-//! every error is ignored, because a dead or misbehaving notifier must
-//! never take down the TUI.
+//! Agent state transitions worth telling the user about. Delivery is the
+//! tmux status line (see `tmux::display_message`), not a desktop popup.
 
 use crate::tmux::{AgentState, Window};
 use std::collections::HashMap;
-use std::process::Command;
-
-fn escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
-}
-
-fn applescript(title: &str, body: &str) -> String {
-    format!(
-        "display notification \"{}\" with title \"{}\"",
-        escape(body),
-        escape(title)
-    )
-}
-
-#[cfg(target_os = "macos")]
-pub fn send(title: &str, body: &str) {
-    let script = applescript(title, body);
-    let _ = Command::new("/usr/bin/osascript")
-        .arg("-e")
-        .arg(script)
-        .spawn();
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn send(title: &str, body: &str) {
-    let _ = Command::new("notify-send").arg(title).arg(body).spawn();
-}
 
 pub fn transitions(
     prev: &HashMap<String, AgentState>,
@@ -57,39 +28,6 @@ pub fn transitions(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn applescript_plain_text() {
-        let script = applescript("Title", "Body");
-        assert_eq!(script, "display notification \"Body\" with title \"Title\"");
-    }
-
-    #[test]
-    fn applescript_escapes_embedded_quote() {
-        let script = applescript("Ti\"tle", "Bo\"dy");
-        assert_eq!(
-            script,
-            "display notification \"Bo\\\"dy\" with title \"Ti\\\"tle\""
-        );
-    }
-
-    #[test]
-    fn applescript_escapes_embedded_backslash() {
-        let script = applescript("Ti\\tle", "Bo\\dy");
-        assert_eq!(
-            script,
-            "display notification \"Bo\\\\dy\" with title \"Ti\\\\tle\""
-        );
-    }
-
-    #[test]
-    fn applescript_escapes_both_quote_and_backslash() {
-        let script = applescript("a\\\"b", "c\\\"d");
-        assert_eq!(
-            script,
-            "display notification \"c\\\\\\\"d\" with title \"a\\\\\\\"b\""
-        );
-    }
 
     fn window(pane_id: &str, state: AgentState) -> Window {
         Window {
