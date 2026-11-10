@@ -1116,10 +1116,17 @@ fn main() -> Result<()> {
                         }
                     }
                     Event::Mouse(m) => {
-                        if app.mode == Mode::Focus
-                            || app.mode == Mode::Filter
-                            || app.mode == Mode::Input
-                        {
+                        if app.mode == Mode::Focus {
+                            // A click on the list leaves focus, same as ctrl-q.
+                            if let MouseEventKind::Down(MouseButton::Left) = m.kind
+                                && app.list_area.contains(Position {
+                                    x: m.column,
+                                    y: m.row,
+                                })
+                            {
+                                app.mode = Mode::Normal;
+                            }
+                        } else if app.mode == Mode::Filter || app.mode == Mode::Input {
                         } else if app.mode == Mode::Mosaic {
                             if let MouseEventKind::Down(MouseButton::Left) = m.kind {
                                 let hit = mouse::mosaic_cell_at(&app.mosaic_areas, m.column, m.row);
@@ -1659,12 +1666,12 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
         Mode::Focus => {
             if let Some(w) = &app.control_warning {
                 Line::from(Span::styled(
-                    format!(" {w} (falling back to polling)   ctrl-q: back to list"),
+                    format!(" {w} (falling back to polling)   ctrl-q or click list: back"),
                     Style::new().fg(Color::Yellow),
                 ))
             } else {
                 Line::from(Span::styled(
-                    " focus: keys go to the agent (exact rendering)   ctrl-q: back to list",
+                    " focus: keys go to the agent (exact rendering)   ctrl-q or click list: back",
                     Style::new().fg(Color::Green),
                 ))
             }
