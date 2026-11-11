@@ -172,6 +172,15 @@ tmux window options. The protocol is tiny and agent-agnostic:
 - `@agent_ctx` (optional): used-context percentage, an integer like `42`.
 - `@agent_transcript` (optional): path to a Claude Code transcript JSONL,
   enables the cost column.
+- `@agent_pane` (optional): the pane the agent runs in, for windows with
+  more than one pane. Preview, focus and input go there; without it claux
+  uses the window's active pane.
+
+Two things no hook reports, so claux checks them itself. A turn cut with
+Esc leaves `[Request interrupted by user]` as the last transcript entry,
+and claux shows that window as idle instead of working. An agent pane
+that is back to a plain shell (the agent was killed and SessionEnd never
+ran) also shows as idle.
 
 For Claude Code, [contrib/claude-code](contrib/claude-code) has a
 ready-made setup:

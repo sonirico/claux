@@ -66,14 +66,16 @@ pub struct Window {
     pub dir: String,
     pub state: AgentState,
     pub ctx: Option<String>,
-    /// The active pane's `%<id>` (e.g. `%3`), stable across resizes and
-    /// renames. Needed to match control-mode `%output %<pane-id>` events to
-    /// the window they belong to.
+    /// The agent's pane `%<id>` (e.g. `%3`): the hook-owned `@agent_pane`
+    /// window option when it names a live pane of the window, the active
+    /// pane otherwise. Stable across resizes and renames. Needed to match
+    /// control-mode `%output %<pane-id>` events to the window they belong
+    /// to, and the target of every pane-level command (capture, send-keys).
     pub pane_id: String,
-    /// Real size of the active pane, used by mosaic cells to size their
+    /// Real size of the agent's pane, used by mosaic cells to size their
     /// vt100 parser (the mosaic never resizes real panes)
     pub pane_cols: u16,
-    /// Real size of the active pane, used by mosaic cells to size their
+    /// Real size of the agent's pane, used by mosaic cells to size their
     /// vt100 parser (the mosaic never resizes real panes)
     pub pane_rows: u16,
     /// Path to the Claude Code transcript backing this window, published by
@@ -107,19 +109,49 @@ fn tmux(args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-pub fn list_windows() -> Result<Vec<Window>> {
-    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}\t#{@agent_group}\t#{@agent_parent}";
-    let out = tmux(&["list-windows", "-a", "-F", fmt])?;
-    let mut windows: Vec<Window> = out.lines().filter_map(parse_line).collect();
-    windows.sort_by(|a, b| (a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)));
-    Ok(windows)
+/// One line of `list-panes -a`: the window as seen from one of its panes.
+struct PaneLine {
+    window: Window,
+    /// This pane is the one `@agent_pane` names.
+    is_agent: bool,
+    is_active: bool,
 }
 
-fn parse_line(line: &str) -> Option<Window> {
+/// Shells left behind when the agent process exits without its SessionEnd
+/// hook firing (killed, crashed): the window's state is stale.
+const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "fish", "dash", "ksh"];
+
+pub fn list_windows() -> Result<Vec<Window>> {
+    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}\t#{@agent_group}\t#{@agent_parent}\t#{@agent_pane}\t#{pane_active}\t#{pane_current_command}";
+    let out = tmux(&["list-panes", "-a", "-F", fmt])?;
+    Ok(agent_panes(out.lines().filter_map(parse_line).collect()))
+}
+
+/// Sorts windows by urgency, then session and index: the default flat view.
+pub fn sort_by_urgency(windows: &mut [Window]) {
+    windows.sort_by(|a, b| (a.state, &a.session, a.index).cmp(&(b.state, &b.session, b.index)));
+}
+
+/// One window per tmux window: its `@agent_pane` line, or its active pane's
+/// when `@agent_pane` is unset or names a pane no longer in the window.
+fn agent_panes(lines: Vec<PaneLine>) -> Vec<Window> {
+    let has_agent = |target: &str| {
+        lines
+            .iter()
+            .any(|l| l.is_agent && l.window.target == target)
+    };
+    lines
+        .iter()
+        .filter(|l| l.is_agent || (l.is_active && !has_agent(&l.window.target)))
+        .map(|l| l.window.clone())
+        .collect()
+}
+
+fn parse_line(line: &str) -> Option<PaneLine> {
     let mut f = line.split('\t');
     let session = f.next()?.to_string();
     let index: u32 = f.next()?.parse().ok()?;
-    let state = AgentState::parse(f.next()?);
+    let mut state = AgentState::parse(f.next()?);
     let name = f.next()?.to_string();
     let dir = f.next()?.to_string();
     let ctx = f.next().filter(|s| !s.is_empty()).map(str::to_string);
@@ -130,7 +162,13 @@ fn parse_line(line: &str) -> Option<Window> {
     let activity: u64 = f.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let group = f.next().filter(|s| !s.is_empty()).map(str::to_string);
     let parent = f.next().filter(|s| !s.is_empty()).map(str::to_string);
-    Some(Window {
+    let is_agent = f.next() == Some(pane_id.as_str());
+    let is_active = f.next().is_none_or(|s| s == "1");
+    let command = f.next().unwrap_or("");
+    if is_agent && state != AgentState::None && SHELLS.contains(&command) {
+        state = AgentState::Idle;
+    }
+    let window = Window {
         target: format!("{session}:{index}"),
         session,
         index,
@@ -145,6 +183,11 @@ fn parse_line(line: &str) -> Option<Window> {
         activity,
         group,
         parent,
+    };
+    Some(PaneLine {
+        window,
+        is_agent,
+        is_active,
     })
 }
 
@@ -159,7 +202,7 @@ impl Window {
 /// Reorders windows so those sharing a `tree_key` sit together, clusters
 /// ordered by their most urgent member, and members within a cluster keeping
 /// their urgency order. Used by the console's tree toggle; the default flat
-/// view stays sorted purely by urgency (see `list_windows`).
+/// view stays sorted purely by urgency (see `sort_by_urgency`).
 pub fn sort_grouped(windows: &mut [Window]) {
     use std::collections::HashMap;
     let mut best: HashMap<String, (AgentState, usize)> = HashMap::new();
@@ -175,7 +218,7 @@ pub fn sort_grouped(windows: &mut [Window]) {
     });
 }
 
-/// Visible content of the window's active pane, with ANSI colors.
+/// Visible content of the pane, with ANSI colors.
 pub fn capture(target: &str) -> Result<String> {
     tmux(&["capture-pane", "-ep", "-t", target])
 }
@@ -379,7 +422,7 @@ fn session_id(transcript: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{key_args, parse_line, session_id};
+    use super::{AgentState, agent_panes, key_args, parse_line, session_id};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn args(code: KeyCode, mods: KeyModifiers) -> Option<Vec<String>> {
@@ -482,7 +525,7 @@ mod tests {
     #[test]
     fn parse_line_full_fields() {
         let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl\t1700000000\tgrp1\t%1";
-        let window = parse_line(line).unwrap();
+        let window = parse_line(line).unwrap().window;
         assert_eq!(window.target, "sess:0");
         assert_eq!(window.pane_id, "%3");
         assert_eq!(window.pane_cols, 80);
@@ -496,7 +539,7 @@ mod tests {
     #[test]
     fn parse_line_missing_activity_is_zero() {
         let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl";
-        let window = parse_line(line).unwrap();
+        let window = parse_line(line).unwrap().window;
         assert_eq!(window.activity, 0);
     }
 
@@ -504,5 +547,73 @@ mod tests {
     fn parse_line_bad_size_is_none() {
         let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\tnotanumber\t24\t/tmp/transcript.jsonl\t1700000000";
         assert!(parse_line(line).is_none());
+    }
+
+    /// A `list-panes` line for pane `pane` of the working window `sess:0`.
+    fn new_test_pane_line(pane: &str, agent_pane: &str, active: &str, command: &str) -> String {
+        format!(
+            "sess\t0\tworking\twin\t/tmp\t\t{pane}\t80\t24\t\t0\t\t\t{agent_pane}\t{active}\t{command}"
+        )
+    }
+
+    fn new_test_windows(lines: &[String]) -> Vec<super::Window> {
+        agent_panes(lines.iter().filter_map(|l| parse_line(l)).collect())
+    }
+
+    #[test]
+    fn agent_panes_picks_the_published_agent_pane() {
+        let lines = [
+            new_test_pane_line("%1", "%2", "1", "nvim"),
+            new_test_pane_line("%2", "%2", "0", "2.1.322"),
+        ];
+
+        let windows = new_test_windows(&lines);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].pane_id, "%2");
+    }
+
+    #[test]
+    fn agent_panes_falls_back_to_the_active_pane_when_unpublished() {
+        let lines = [
+            new_test_pane_line("%1", "", "0", "zsh"),
+            new_test_pane_line("%2", "", "1", "2.1.322"),
+        ];
+
+        let windows = new_test_windows(&lines);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].pane_id, "%2");
+    }
+
+    #[test]
+    fn agent_panes_falls_back_to_the_active_pane_when_agent_pane_is_gone() {
+        let lines = [
+            new_test_pane_line("%1", "%9", "1", "2.1.322"),
+            new_test_pane_line("%2", "%9", "0", "zsh"),
+        ];
+
+        let windows = new_test_windows(&lines);
+
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].pane_id, "%1");
+    }
+
+    #[test]
+    fn parse_line_agent_pane_back_to_a_shell_is_idle() {
+        let line = new_test_pane_line("%2", "%2", "1", "zsh");
+
+        let window = parse_line(&line).unwrap().window;
+
+        assert_eq!(window.state, AgentState::Idle);
+    }
+
+    #[test]
+    fn parse_line_shell_in_fallback_pane_keeps_state() {
+        let line = new_test_pane_line("%2", "", "1", "zsh");
+
+        let window = parse_line(&line).unwrap().window;
+
+        assert_eq!(window.state, AgentState::Working);
     }
 }
