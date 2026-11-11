@@ -1,46 +1,60 @@
-//! Approximate USD cost of a Claude Code transcript, computed from the usage
-//! blocks embedded in its assistant turns at standard first-party API rates.
-//! Parsing is incremental by byte offset per transcript path, so refreshing
-//! the cost on a multi-MB transcript only re-reads and re-parses the bytes
-//! appended since the previous call.
+//! What claux reads from a Claude Code transcript: the approximate USD cost,
+//! computed from the usage blocks embedded in its assistant turns at
+//! standard first-party API rates, and whether the last turn was cut short
+//! by the user (Esc), which no hook reports. Parsing is incremental by byte
+//! offset per transcript path, so refreshing a multi-MB transcript only
+//! re-reads and re-parses the bytes appended since the previous call.
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
-struct PathState {
-    offset: u64,
-    total: f64,
+/// Text Claude Code writes as a user entry when a turn is interrupted.
+const INTERRUPT_MARKER: &str = "[Request interrupted by user";
+
+/// What a transcript says so far.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Scan {
+    /// Accumulated cost in USD since claux started tracking the path.
+    pub cost: f64,
+    /// The last user or assistant entry is an interrupt marker: the turn
+    /// was cut short and the agent is no longer working.
+    pub interrupted: bool,
 }
 
-/// Tracks accumulated USD cost per transcript path, incrementally.
-pub struct CostTracker {
+struct PathState {
+    offset: u64,
+    scan: Scan,
+}
+
+/// Tracks each transcript path's `Scan`, incrementally.
+pub struct TranscriptTracker {
     state: HashMap<String, PathState>,
 }
 
-impl CostTracker {
-    pub fn new() -> CostTracker {
-        CostTracker {
+impl TranscriptTracker {
+    pub fn new() -> TranscriptTracker {
+        TranscriptTracker {
             state: HashMap::new(),
         }
     }
 
-    /// Returns the transcript's accumulated cost in USD since claux started
-    /// tracking it, or `None` if the file cannot be read. Only complete
-    /// lines (terminated by `\n`) are consumed; a trailing partial line is
-    /// retried on the next call. A file smaller than the previously stored
-    /// offset resets that path's state and reparses from zero.
-    pub fn cost_for(&mut self, path: &str) -> Option<f64> {
+    /// Returns the transcript's `Scan`, or `None` if the file cannot be
+    /// read. Only complete lines (terminated by `\n`) are consumed; a
+    /// trailing partial line is retried on the next call. A file smaller
+    /// than the previously stored offset resets that path's state and
+    /// reparses from zero.
+    pub fn scan(&mut self, path: &str) -> Option<Scan> {
         let mut file = File::open(path).ok()?;
         let len = file.metadata().ok()?.len();
 
-        let (mut offset, mut total) = match self.state.get(path) {
-            Some(s) => (s.offset, s.total),
-            None => (0, 0.0),
+        let (mut offset, mut scan) = match self.state.get(path) {
+            Some(s) => (s.offset, s.scan),
+            None => (0, Scan::default()),
         };
 
         if len < offset {
             offset = 0;
-            total = 0.0;
+            scan = Scan::default();
         }
 
         file.seek(SeekFrom::Start(offset)).ok()?;
@@ -52,9 +66,12 @@ impl CostTracker {
                 if line.is_empty() {
                     continue;
                 }
-                if let Ok(text) = std::str::from_utf8(line) {
-                    if let Some(cost) = line_cost(text) {
-                        total += cost;
+                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(line) {
+                    if let Some(cost) = line_cost(&value) {
+                        scan.cost += cost;
+                    }
+                    if let Some(interrupted) = line_interrupted(&value) {
+                        scan.interrupted = interrupted;
                     }
                 }
             }
@@ -62,9 +79,37 @@ impl CostTracker {
         }
 
         self.state
-            .insert(path.to_string(), PathState { offset, total });
-        Some(total)
+            .insert(path.to_string(), PathState { offset, scan });
+        Some(scan)
     }
+}
+
+/// For a user or assistant entry, whether it is an interrupt marker;
+/// `None` for every other entry type (system, attachment, ...), which must
+/// not clear a pending interrupt.
+fn line_interrupted(value: &serde_json::Value) -> Option<bool> {
+    let kind = value.get("type")?.as_str()?;
+    if kind == "assistant" {
+        return Some(false);
+    }
+    if kind != "user" {
+        return None;
+    }
+    let is_marker =
+        |v: &serde_json::Value| v.as_str().is_some_and(|t| t.starts_with(INTERRUPT_MARKER));
+    let interrupted = match value.get("message").and_then(|m| m.get("content")) {
+        Some(serde_json::Value::String(t)) => t.starts_with(INTERRUPT_MARKER),
+        Some(serde_json::Value::Array(blocks)) => blocks.iter().any(|b| {
+            b.get("text").is_some_and(is_marker)
+                || b.get("content").is_some_and(|c| {
+                    is_marker(c)
+                        || c.as_array()
+                            .is_some_and(|a| a.iter().any(|t| t.get("text").is_some_and(is_marker)))
+                })
+        }),
+        _ => false,
+    };
+    Some(interrupted)
 }
 
 /// (input, output) USD per 1M tokens, by substring match on the model id.
@@ -82,10 +127,9 @@ fn model_rates(model: &str) -> (f64, f64) {
     }
 }
 
-/// Parses one JSONL line and returns its USD cost if it is a valid
-/// assistant entry with a `message.usage` object; `None` otherwise.
-fn line_cost(text: &str) -> Option<f64> {
-    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+/// Returns one JSONL entry's USD cost if it is an assistant entry with a
+/// `message.usage` object; `None` otherwise.
+fn line_cost(value: &serde_json::Value) -> Option<f64> {
     if value.get("type")?.as_str()? != "assistant" {
         return None;
     }
@@ -140,7 +184,11 @@ mod tests {
     impl TempFile {
         fn new(name: &str) -> TempFile {
             let mut path = std::env::temp_dir();
-            path.push(format!("claux-cost-test-{}-{}", std::process::id(), name));
+            path.push(format!(
+                "claux-transcript-test-{}-{}",
+                std::process::id(),
+                name
+            ));
             TempFile { path }
         }
 
@@ -168,6 +216,10 @@ mod tests {
         }
     }
 
+    fn json(line: &str) -> serde_json::Value {
+        serde_json::from_str(line).unwrap()
+    }
+
     fn entry(model: &str, usage: &str) -> String {
         format!(
             r#"{{"type":"assistant","message":{{"model":"{}","usage":{}}}}}"#,
@@ -189,7 +241,7 @@ mod tests {
     fn entry_cost_formula() {
         let usage = r#"{"input_tokens":100,"output_tokens":200,"cache_read_input_tokens":300,"cache_creation":{"ephemeral_5m_input_tokens":400,"ephemeral_1h_input_tokens":500}}"#;
         let line = entry("claude-sonnet-5", usage);
-        let cost = line_cost(&line).unwrap();
+        let cost = line_cost(&json(&line)).unwrap();
         let i = 3.0;
         let o = 15.0;
         let expected =
@@ -201,7 +253,7 @@ mod tests {
     fn entry_cost_without_cache_creation_object() {
         let usage = r#"{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":0,"cache_creation_input_tokens":50}"#;
         let line = entry("claude-opus-4-1", usage);
-        let cost = line_cost(&line).unwrap();
+        let cost = line_cost(&json(&line)).unwrap();
         let i = 5.0;
         let o = 25.0;
         let expected = (10.0 * i + 20.0 * o + 1.25 * i * 50.0) / 1e6;
@@ -215,11 +267,11 @@ mod tests {
         let line = entry("claude-sonnet-5", usage);
 
         tmp.write(&format!("{}\n", line));
-        let mut tracker = CostTracker::new();
-        let first = tracker.cost_for(&tmp.path_str()).unwrap();
+        let mut tracker = TranscriptTracker::new();
+        let first = tracker.scan(&tmp.path_str()).unwrap().cost;
 
         tmp.append(&format!("{}\n", line));
-        let second = tracker.cost_for(&tmp.path_str()).unwrap();
+        let second = tracker.scan(&tmp.path_str()).unwrap().cost;
 
         assert!((second - 2.0 * first).abs() < 1e-9);
     }
@@ -231,17 +283,17 @@ mod tests {
         let line = entry("claude-sonnet-5", usage);
 
         tmp.write(&format!("{}\n", line));
-        let mut tracker = CostTracker::new();
-        let first = tracker.cost_for(&tmp.path_str()).unwrap();
+        let mut tracker = TranscriptTracker::new();
+        let first = tracker.scan(&tmp.path_str()).unwrap().cost;
 
         // Append a second entry WITHOUT a trailing newline: incomplete line.
         tmp.append(&line);
-        let second = tracker.cost_for(&tmp.path_str()).unwrap();
+        let second = tracker.scan(&tmp.path_str()).unwrap().cost;
         assert!((second - first).abs() < 1e-9);
 
         // Complete the line: now it should count.
         tmp.append("\n");
-        let third = tracker.cost_for(&tmp.path_str()).unwrap();
+        let third = tracker.scan(&tmp.path_str()).unwrap().cost;
         assert!((third - 2.0 * first).abs() < 1e-9);
     }
 
@@ -252,11 +304,11 @@ mod tests {
         let line = entry("claude-sonnet-5", usage);
 
         tmp.write(&format!("{}\n{}\n", line, line));
-        let mut tracker = CostTracker::new();
-        let two_entries = tracker.cost_for(&tmp.path_str()).unwrap();
+        let mut tracker = TranscriptTracker::new();
+        let two_entries = tracker.scan(&tmp.path_str()).unwrap().cost;
 
         tmp.write(&format!("{}\n", line));
-        let after_truncate = tracker.cost_for(&tmp.path_str()).unwrap();
+        let after_truncate = tracker.scan(&tmp.path_str()).unwrap().cost;
 
         assert!((after_truncate - two_entries / 2.0).abs() < 1e-9);
     }
@@ -265,11 +317,11 @@ mod tests {
     fn missing_file_is_none() {
         let mut tmp_path = std::env::temp_dir();
         tmp_path.push(format!(
-            "claux-cost-test-{}-does-not-exist",
+            "claux-transcript-test-{}-does-not-exist",
             std::process::id()
         ));
-        let mut tracker = CostTracker::new();
-        assert_eq!(tracker.cost_for(&tmp_path.to_string_lossy()), None);
+        let mut tracker = TranscriptTracker::new();
+        assert_eq!(tracker.scan(&tmp_path.to_string_lossy()), None);
     }
 
     #[test]
@@ -284,9 +336,58 @@ mod tests {
             "{}\n{}\n{}\n",
             assistant_line, user_line, garbage_line
         ));
-        let mut tracker = CostTracker::new();
-        let cost = tracker.cost_for(&tmp.path_str()).unwrap();
-        let expected = line_cost(&assistant_line).unwrap();
+        let mut tracker = TranscriptTracker::new();
+        let cost = tracker.scan(&tmp.path_str()).unwrap().cost;
+        let expected = line_cost(&json(&assistant_line)).unwrap();
         assert!((cost - expected).abs() < 1e-9);
+    }
+
+    const USER_PROMPT: &str = r#"{"type":"user","message":{"role":"user","content":"do it"}}"#;
+    const INTERRUPT_TEXT: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user]"}]}}"#;
+    const INTERRUPT_TOOL: &str = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"[Request interrupted by user for tool use]"}]}}"#;
+    const SYSTEM_ENTRY: &str = r#"{"type":"system","subtype":"away_summary"}"#;
+
+    fn new_test_scan(name: &str, lines: &[&str]) -> Scan {
+        let tmp = TempFile::new(name);
+        tmp.write(&format!("{}\n", lines.join("\n")));
+        TranscriptTracker::new().scan(&tmp.path_str()).unwrap()
+    }
+
+    #[test]
+    fn interrupt_text_marks_interrupted() {
+        let scan = new_test_scan("int-text", &[USER_PROMPT, INTERRUPT_TEXT]);
+
+        assert!(scan.interrupted);
+    }
+
+    #[test]
+    fn interrupt_tool_result_marks_interrupted() {
+        let scan = new_test_scan("int-tool", &[USER_PROMPT, INTERRUPT_TOOL]);
+
+        assert!(scan.interrupted);
+    }
+
+    #[test]
+    fn interrupt_survives_system_entries() {
+        let scan = new_test_scan("int-system", &[INTERRUPT_TEXT, SYSTEM_ENTRY]);
+
+        assert!(scan.interrupted);
+    }
+
+    #[test]
+    fn interrupt_cleared_by_next_prompt() {
+        let scan = new_test_scan("int-cleared", &[INTERRUPT_TEXT, USER_PROMPT]);
+
+        assert!(!scan.interrupted);
+    }
+
+    #[test]
+    fn interrupt_cleared_by_assistant_entry() {
+        let usage = r#"{"input_tokens":1,"output_tokens":1}"#;
+        let assistant = entry("claude-sonnet-5", usage);
+
+        let scan = new_test_scan("int-assistant", &[INTERRUPT_TEXT, &assistant]);
+
+        assert!(!scan.interrupted);
     }
 }

@@ -16,11 +16,11 @@
 //! claux owns no state: if it dies, tmux and the agents are untouched.
 
 mod control;
-mod cost;
 mod mouse;
 mod notify;
 mod timeline;
 mod tmux;
+mod transcript;
 mod vtrender;
 
 use ansi_to_tui::IntoText;
@@ -269,8 +269,8 @@ struct App {
     mosaic_clients: Vec<(String, ControlClient)>,
     /// Index into `mosaic_cells` of the currently highlighted cell.
     mosaic_selected: usize,
-    /// Incremental USD cost parser, keyed internally by transcript path.
-    cost: cost::CostTracker,
+    /// Incremental transcript parser, keyed internally by transcript path.
+    transcripts: transcript::TranscriptTracker,
     /// Latest accumulated USD cost per window, keyed by window target.
     costs: HashMap<String, f64>,
     /// In-memory history of agent state transitions, used to render the
@@ -331,7 +331,7 @@ impl App {
             mosaic_cells: Vec::new(),
             mosaic_clients: Vec::new(),
             mosaic_selected: 0,
-            cost: cost::CostTracker::new(),
+            transcripts: transcript::TranscriptTracker::new(),
             costs: HashMap::new(),
             history: timeline::History::new(),
             row_h: 1,
@@ -388,6 +388,21 @@ impl App {
                 return;
             }
         }
+        let transcripts = &mut self.transcripts;
+        let mut costs = HashMap::new();
+        for w in &mut self.all {
+            let Some(scan) = w.transcript.as_ref().and_then(|p| transcripts.scan(p)) else {
+                continue;
+            };
+            // No hook fires when a turn is cut with Esc, so the transcript
+            // is the only place that says the agent stopped working.
+            if scan.interrupted && w.state == AgentState::Working {
+                w.state = AgentState::Idle;
+            }
+            costs.insert(w.target.clone(), scan.cost);
+        }
+        self.costs = costs;
+        tmux::sort_by_urgency(&mut self.all);
         if self.notify {
             for (target, name, state) in notify::transitions(&self.prev_states, &self.all) {
                 let msg = format!("claux: {}  {target}  {name}", state.label());
@@ -402,16 +417,6 @@ impl App {
             .map(|w| (w.pane_id.clone(), w.state))
             .collect();
         self.history.record(now_ms(), &self.all);
-        let cost = &mut self.cost;
-        self.costs = self
-            .all
-            .iter()
-            .filter_map(|w| {
-                let path = w.transcript.as_ref()?;
-                let usd = cost.cost_for(path)?;
-                Some((w.target.clone(), usd))
-            })
-            .collect();
         self.apply_filter();
     }
 
@@ -453,13 +458,16 @@ impl App {
     }
 
     fn refresh_preview(&mut self) {
-        let Some(target) = self.selected().map(|w| w.target.clone()) else {
+        let Some((target, pane)) = self
+            .selected()
+            .map(|w| (w.target.clone(), w.pane_id.clone()))
+        else {
             self.preview = Text::default();
             self.preview_target.clear();
             return;
         };
         self.preview_target = target.clone();
-        let mut text = match tmux::capture(&target) {
+        let mut text = match tmux::capture(&pane) {
             Ok(raw) => raw
                 .clone()
                 .into_text()
@@ -548,7 +556,7 @@ impl App {
 
     fn seed_vt(&mut self, w: &Window, cols: u16, rows: u16) {
         let mut parser = vt100::Parser::new(rows, cols, 0);
-        match tmux::capture_screen_raw(&w.target) {
+        match tmux::capture_screen_raw(&w.pane_id) {
             Ok(raw) => parser.process(raw.as_bytes()),
             Err(e) => self.control_warning = Some(e.to_string()),
         }
@@ -656,7 +664,7 @@ impl App {
                 continue;
             }
             let mut parser = vt100::Parser::new(cell.window.pane_rows, cell.window.pane_cols, 0);
-            match tmux::capture_screen_raw(&cell.window.target) {
+            match tmux::capture_screen_raw(&cell.window.pane_id) {
                 Ok(raw) => {
                     parser.process(raw.as_bytes());
                     cell.vt = Some(parser);
@@ -860,7 +868,7 @@ fn main() -> Result<()> {
                                     let text = std::mem::take(&mut app.input);
                                     app.mode = Mode::Normal;
                                     if let Some(w) = app.selected() {
-                                        app.flash = match tmux::send_line(&w.target, &text) {
+                                        app.flash = match tmux::send_line(&w.pane_id, &text) {
                                             Ok(()) => Some(format!("sent to {}", w.target)),
                                             Err(e) => Some(e.to_string()),
                                         };
@@ -961,11 +969,13 @@ fn main() -> Result<()> {
                                 }
                                 KeyCode::Char('R') => {
                                     if let Some(w) = app.selected() {
-                                        app.flash =
-                                            match tmux::send_line(&w.target, "claude --continue") {
-                                                Ok(()) => Some(format!("resuming {}", w.target)),
-                                                Err(e) => Some(e.to_string()),
-                                            };
+                                        app.flash = match tmux::send_line(
+                                            &w.pane_id,
+                                            "claude --continue",
+                                        ) {
+                                            Ok(()) => Some(format!("resuming {}", w.target)),
+                                            Err(e) => Some(e.to_string()),
+                                        };
                                     }
                                 }
                                 KeyCode::Char('n') | KeyCode::Char('f') => {
@@ -1040,7 +1050,7 @@ fn main() -> Result<()> {
                                     // only killed on app exit (see ControlClient's Drop).
                                     app.mode = Mode::Normal;
                                 } else if let Some(w) = app.selected().cloned() {
-                                    if let Err(e) = tmux::send_key(&w.target, key) {
+                                    if let Err(e) = tmux::send_key(&w.pane_id, key) {
                                         app.flash = Some(e.to_string());
                                     }
                                     if app.vt.is_none() {
