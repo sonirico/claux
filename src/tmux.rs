@@ -5,6 +5,7 @@
 use anyhow::{Context, Result, bail};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::process::Command;
+use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AgentState {
@@ -253,15 +254,23 @@ pub fn switch(session: &str) -> Result<()> {
 }
 
 /// Attach this terminal to the window and BLOCK until the client detaches
-/// (prefix+d) or the session dies. For running claux outside tmux: the
-/// caller must have released the terminal (raw mode, alternate screen)
-/// before calling, and restores it after.
-pub fn attach(session: &str, target: &str) -> Result<()> {
+/// (prefix+d) or the session dies, calling `tick` every `every` meanwhile.
+/// For running claux outside tmux: the caller must have released the
+/// terminal (raw mode, alternate screen) before calling, and restores it
+/// after.
+pub fn attach(session: &str, target: &str, every: Duration, mut tick: impl FnMut()) -> Result<()> {
     tmux(&["select-window", "-t", target])?;
-    let status = Command::new("tmux")
+    let mut child = Command::new("tmux")
         .args(["attach-session", "-t", session])
-        .status()
+        .spawn()
         .context("failed to spawn tmux attach")?;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        tick();
+        std::thread::sleep(every);
+    };
     if !status.success() {
         bail!("tmux attach-session -t {session} exited with {status}");
     }
