@@ -413,10 +413,7 @@ impl App {
                 self.flash = Some(msg);
             }
             if events.iter().any(|e| e.beep) {
-                // Terminal bell. Best effort, same as the message above.
-                use std::io::Write;
-                let mut out = std::io::stdout();
-                let _ = out.write_all(b"\x07").and_then(|()| out.flush());
+                notify::beep();
             }
         }
         self.prev_states = snapshot;
