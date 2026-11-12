@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AgentState {
@@ -264,12 +264,18 @@ pub fn attach(session: &str, target: &str, every: Duration, mut tick: impl FnMut
         .args(["attach-session", "-t", session])
         .spawn()
         .context("failed to spawn tmux attach")?;
+    // Check the child often so a detach drops back to claux at once, but
+    // only run the (slower) tick every `every`.
+    let mut last_tick = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        tick();
-        std::thread::sleep(every);
+        if last_tick.elapsed() >= every {
+            tick();
+            last_tick = Instant::now();
+        }
+        std::thread::sleep(Duration::from_millis(20));
     };
     if !status.success() {
         bail!("tmux attach-session -t {session} exited with {status}");
