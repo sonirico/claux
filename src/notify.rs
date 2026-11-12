@@ -17,6 +17,25 @@ pub struct Event {
     pub beep: bool,
 }
 
+/// Best effort, like the status-line message. On macOS it plays the system
+/// Ping sound, because Terminal.app often has the audible bell turned off;
+/// elsewhere it rings the terminal bell.
+pub fn beep() {
+    if cfg!(target_os = "macos") {
+        if let Ok(mut child) = std::process::Command::new("afplay")
+            .arg("/System/Library/Sounds/Ping.aiff")
+            .spawn()
+        {
+            // Reap it off the UI thread so it neither blocks nor lingers.
+            std::thread::spawn(move || child.wait());
+        }
+        return;
+    }
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(b"\x07").and_then(|()| out.flush());
+}
+
 pub fn snapshot(windows: &[Window], now_s: u64) -> Snapshot {
     windows
         .iter()
