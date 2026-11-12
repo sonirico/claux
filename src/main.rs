@@ -996,7 +996,9 @@ fn main() -> Result<()> {
                                                         app.flash = Some(format!("-> {target}"));
                                                     }
                                                 } else if let Err(e) = suspend_and(terminal, || {
-                                                    tmux::attach(&w.session, &target)
+                                                    tmux::attach(&w.session, &target, TICK, || {
+                                                        app.refresh()
+                                                    })
                                                 }) {
                                                     app.flash = Some(e.to_string());
                                                 }
@@ -1032,7 +1034,9 @@ fn main() -> Result<()> {
                                         }
                                     } else if let Some(w) = app.selected().cloned() {
                                         if let Err(e) = suspend_and(terminal, || {
-                                            tmux::attach(&w.session, &w.target)
+                                            tmux::attach(&w.session, &w.target, TICK, || {
+                                                app.refresh()
+                                            })
                                         }) {
                                             app.flash = Some(e.to_string());
                                         }
