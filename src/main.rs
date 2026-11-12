@@ -248,7 +248,7 @@ struct App {
     last_preview_inner: Rect,
     /// Per-window state as of the last refresh, keyed by `pane_id`, used to
     /// detect transitions worth a desktop notification.
-    prev_states: HashMap<String, AgentState>,
+    prev_states: notify::Snapshot,
     /// Whether state-change notifications are enabled (`--no-notify` disables).
     notify: bool,
     /// What the list shows, row by row; `list`'s selection indexes this.
@@ -403,19 +403,23 @@ impl App {
         }
         self.costs = costs;
         tmux::sort_by_urgency(&mut self.all);
+        let snapshot = notify::snapshot(&self.all, now_ms() / 1000);
         if self.notify {
-            for (target, name, state) in notify::transitions(&self.prev_states, &self.all) {
-                let msg = format!("claux: {}  {target}  {name}", state.label());
+            let events = notify::transitions(&self.prev_states, &snapshot, &self.all);
+            for e in &events {
+                let msg = format!("claux: {}  {}  {}", e.label, e.target, e.name);
                 // Best effort: a failed tmux message must never take down the TUI.
                 let _ = tmux::display_message(&msg);
                 self.flash = Some(msg);
             }
+            if events.iter().any(|e| e.beep) {
+                // Terminal bell. Best effort, same as the message above.
+                use std::io::Write;
+                let mut out = std::io::stdout();
+                let _ = out.write_all(b"\x07").and_then(|()| out.flush());
+            }
         }
-        self.prev_states = self
-            .all
-            .iter()
-            .map(|w| (w.pane_id.clone(), w.state))
-            .collect();
+        self.prev_states = snapshot;
         self.history.record(now_ms(), &self.all);
         self.apply_filter();
     }

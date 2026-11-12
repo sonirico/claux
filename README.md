@@ -122,10 +122,12 @@ matching the pane's real width, same as before.
 
 ## Notifications
 
-When a window's agent state transitions into waiting, error or done, claux
-shows a short message in the status line of every attached tmux client
-(`display-message`) and in its own footer. There are no desktop popups. Other transitions (working, compacting, idle) stay silent to
-avoid churn. Pass `--no-notify` to disable notifications entirely. Outside
+When a window's agent state transitions into waiting, error or done, or a
+working agent becomes stuck, claux shows a short message in the status line
+of every attached tmux client (`display-message`) and in its own footer.
+Waiting, done and stuck also ring the terminal bell; error does not. There
+are no desktop popups. Other transitions (working, compacting, idle) stay
+silent to avoid churn. Pass `--no-notify` to disable notifications entirely. Outside
 tmux claux keeps polling while you are attached with o, so the message lands
 in the status line of the session you are in. Since the fleet poll pauses
 while in focus mode, no notifications fire during focus.
