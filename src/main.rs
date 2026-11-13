@@ -163,10 +163,10 @@ fn push_subtree(windows: &[Window], i: usize, rows: &mut Vec<Row>) {
 /// under the same tree node; a fork whose parent is gone stands on its own.
 fn parent_of(windows: &[Window], i: usize) -> Option<usize> {
     let w = &windows[i];
-    let pane = w.parent.as_deref()?;
+    let parent = w.parent.as_deref()?;
     windows
         .iter()
-        .position(|p| p.pane_id == pane && p.tree_key() == w.tree_key())
+        .position(|p| p.window_id == parent && p.tree_key() == w.tree_key())
 }
 
 /// How many forks deep window `i` sits under its tree node.
@@ -1718,6 +1718,7 @@ mod tests {
             transcript: None,
             activity: 0,
             group: group.map(str::to_string),
+            window_id: String::new(),
             parent: None,
         }
     }
@@ -1768,9 +1769,9 @@ mod tests {
         );
     }
 
-    fn new_test_fork(session: &str, index: u32, parent_pane: &str) -> Window {
+    fn new_test_fork(session: &str, index: u32, parent_window: &str) -> Window {
         Window {
-            parent: Some(parent_pane.to_string()),
+            parent: Some(parent_window.to_string()),
             ..new_test_window(session, index, None)
         }
     }
@@ -1778,9 +1779,9 @@ mod tests {
     #[test]
     fn build_rows_tree_nests_a_fork_under_its_parent() {
         let mut parent = new_test_window("a", 2, None);
-        parent.pane_id = "%2".to_string();
+        parent.window_id = "@2".to_string();
         let windows = [
-            new_test_fork("a", 3, "%2"),
+            new_test_fork("a", 3, "@2"),
             new_test_window("a", 1, None),
             parent,
         ];
@@ -1799,8 +1800,24 @@ mod tests {
     }
 
     #[test]
+    fn build_rows_tree_nests_a_fork_after_its_parent_changes_agent_pane() {
+        let mut parent = new_test_window("a", 1, None);
+        parent.window_id = "@1".to_string();
+        parent.pane_id = "%9".to_string();
+        let windows = [parent, new_test_fork("a", 2, "@1")];
+
+        let rows = build_rows(&windows, true, &HashSet::new());
+
+        assert_eq!(fork_depth(&windows, 1), 1);
+        assert_eq!(
+            rows,
+            vec![Row::Header("a".to_string()), Row::Window(0), Row::Window(1),]
+        );
+    }
+
+    #[test]
     fn build_rows_tree_keeps_an_orphan_fork_as_a_root() {
-        let windows = [new_test_fork("a", 3, "%9")];
+        let windows = [new_test_fork("a", 3, "@9")];
 
         let rows = build_rows(&windows, true, &HashSet::new());
 
@@ -1810,8 +1827,8 @@ mod tests {
     #[test]
     fn build_rows_flat_ignores_fork_parents() {
         let mut parent = new_test_window("a", 2, None);
-        parent.pane_id = "%2".to_string();
-        let windows = [new_test_fork("a", 3, "%2"), parent];
+        parent.window_id = "@2".to_string();
+        let windows = [new_test_fork("a", 3, "@2"), parent];
 
         let rows = build_rows(&windows, false, &HashSet::new());
 
@@ -1821,10 +1838,10 @@ mod tests {
     #[test]
     fn fork_depth_counts_nested_forks() {
         let mut root = new_test_window("a", 1, None);
-        root.pane_id = "%1".to_string();
-        let mut child = new_test_fork("a", 2, "%1");
-        child.pane_id = "%2".to_string();
-        let windows = [root, child, new_test_fork("a", 3, "%2")];
+        root.window_id = "@1".to_string();
+        let mut child = new_test_fork("a", 2, "@1");
+        child.window_id = "@2".to_string();
+        let windows = [root, child, new_test_fork("a", 3, "@2")];
 
         assert_eq!(fork_depth(&windows, 2), 2);
     }

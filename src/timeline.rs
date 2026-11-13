@@ -111,6 +111,7 @@ mod tests {
             transcript: None,
             activity: 0,
             group: None,
+            window_id: String::new(),
             parent: None,
         }
     }

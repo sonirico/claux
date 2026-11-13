@@ -94,6 +94,7 @@ mod tests {
             transcript: None,
             activity: NOW_S,
             group: None,
+            window_id: String::new(),
             parent: None,
         }
     }

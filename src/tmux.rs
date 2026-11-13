@@ -90,7 +90,10 @@ pub struct Window {
     /// `CLAUDING_TASK_ID`) via the hook-owned `@agent_group` window option.
     /// `None` when unset; claux stays agnostic of what the tag means.
     pub group: Option<String>,
-    /// Pane id of the window this one was forked from (`f`), published as
+    /// tmux window id `@<id>` (e.g. `@3`): unlike the agent's pane, fixed
+    /// for the window's whole life.
+    pub window_id: String,
+    /// Window id of the window this one was forked from (`f`), published as
     /// the `@agent_parent` window option. The tree view nests it there.
     pub parent: Option<String>,
 }
@@ -123,7 +126,7 @@ struct PaneLine {
 const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "fish", "dash", "ksh"];
 
 pub fn list_windows() -> Result<Vec<Window>> {
-    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}\t#{@agent_group}\t#{@agent_parent}\t#{@agent_pane}\t#{pane_active}\t#{pane_current_command}";
+    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}\t#{@agent_group}\t#{@agent_parent}\t#{@agent_pane}\t#{pane_active}\t#{pane_current_command}\t#{window_id}";
     let out = tmux(&["list-panes", "-a", "-F", fmt])?;
     Ok(agent_panes(out.lines().filter_map(parse_line).collect()))
 }
@@ -166,6 +169,7 @@ fn parse_line(line: &str) -> Option<PaneLine> {
     let is_agent = f.next() == Some(pane_id.as_str());
     let is_active = f.next().is_none_or(|s| s == "1");
     let command = f.next().unwrap_or("");
+    let window_id = f.next().unwrap_or("").to_string();
     if is_agent && state != AgentState::None && SHELLS.contains(&command) {
         state = AgentState::Idle;
     }
@@ -183,6 +187,7 @@ fn parse_line(line: &str) -> Option<PaneLine> {
         transcript,
         activity,
         group,
+        window_id,
         parent,
     };
     Some(PaneLine {
@@ -421,7 +426,7 @@ pub fn fork_window(src: &Window) -> Result<String> {
         "-t",
         &target,
         "@agent_parent",
-        &src.pane_id,
+        &src.window_id,
     ])?;
     send_line(&target, &format!("claude --resume {id} --fork-session"))?;
     Ok(target)
@@ -539,7 +544,7 @@ mod tests {
 
     #[test]
     fn parse_line_full_fields() {
-        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl\t1700000000\tgrp1\t%1";
+        let line = "sess\t0\twaiting\twin\t/tmp\tctxval\t%3\t80\t24\t/tmp/transcript.jsonl\t1700000000\tgrp1\t@1\t%3\t1\tclaude\t@0";
         let window = parse_line(line).unwrap().window;
         assert_eq!(window.target, "sess:0");
         assert_eq!(window.pane_id, "%3");
@@ -548,7 +553,8 @@ mod tests {
         assert_eq!(window.transcript, Some("/tmp/transcript.jsonl".to_string()));
         assert_eq!(window.activity, 1700000000);
         assert_eq!(window.group, Some("grp1".to_string()));
-        assert_eq!(window.parent, Some("%1".to_string()));
+        assert_eq!(window.parent, Some("@1".to_string()));
+        assert_eq!(window.window_id, "@0");
     }
 
     #[test]
