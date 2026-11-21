@@ -69,7 +69,7 @@ bind C-a if-shell "tmux has-session -t claux 2>/dev/null" \
 Keys: enter opens focus mode on the selected window (see below), o jumps
 to the window / attaches (the old enter behavior), i types a line into the
 selected agent's pane without attaching (empty line = just Enter, to accept
-a default), n opens a new window in the selected window's directory, f
+a default), u selects the oldest unread window, n opens a new window in the selected window's directory, f
 forks the selected agent's Claude session into a new window (`name~fork`,
 same directory and group, nested under its parent in the tree view, the
 original keeps running), R sends
@@ -125,9 +125,11 @@ matching the pane's real width, same as before.
 When a window's agent state transitions into waiting, error or done, or a
 working agent becomes stuck, claux shows a short message in the status line
 of every attached tmux client (`display-message`) and in its own footer.
-Waiting, done and stuck also beep (the system Ping sound on macOS, the
-terminal bell elsewhere); error does not. There
-are no desktop popups. Other transitions (working, compacting, idle) stay
+Waiting and stuck also beep (the system Ping sound on macOS, the
+terminal bell elsewhere); done and error do not. A finished turn shows up
+as unread instead (see `@agent_unread`): a dot next to the state icon and
+an unread count in the header. `u` selects the window that has been unread
+the longest. There are no desktop popups. Other transitions (working, compacting, idle) stay
 silent to avoid churn. Pass `--no-notify` to disable notifications entirely. Outside
 tmux claux keeps polling while you are attached with o, so the message lands
 in the status line of the session you are in. Since the fleet poll pauses
@@ -180,6 +182,10 @@ tmux window options. The protocol is tiny and agent-agnostic:
 - `@agent_pane` (optional): the pane the agent runs in, for windows with
   more than one pane. Preview, focus and input go there; without it claux
   uses the window's active pane.
+- `@agent_unread` (optional): epoch seconds since the agent finished or
+  started waiting while you were not looking at it. claux only reads it;
+  clear it when the window is visited, e.g. in `~/.tmux.conf`:
+  `set-hook -ga session-window-changed "set-window-option -u @agent_unread"`.
 
 Two things no hook reports, so claux checks them itself. A turn cut with
 Esc leaves `[Request interrupted by user]` as the last transcript entry,

@@ -37,6 +37,10 @@
           {
             "type": "command",
             "command": "[ -n \"$TMUX_PANE\" ] && command -v jq >/dev/null 2>&1 && tp=$(jq -r \".transcript_path // empty\" 2>/dev/null) && [ -n \"$tp\" ] && tmux set-window-option -t \"$TMUX_PANE\" @agent_transcript \"$tp\" 2>/dev/null; true"
+          },
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && tmux set-window-option -t \"$TMUX_PANE\" -u @agent_unread 2>/dev/null; true"
           }
         ]
       },
@@ -56,6 +60,10 @@
           {
             "type": "command",
             "command": "[ -n \"$TMUX_PANE\" ] && tmux set-window-option -t \"$TMUX_PANE\" @agent_state waiting 2>/dev/null; true"
+          },
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && [ -z \"$(tmux show-window-option -v -t \"$TMUX_PANE\" @agent_unread 2>/dev/null)\" ] && ! { [ \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{window_active}')\" = 1 ] && tmux list-clients -t \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{session_name}')\" -F '#{client_flags}' 2>/dev/null | grep -q focused; } && tmux set-window-option -t \"$TMUX_PANE\" @agent_unread \"$(date +%s)\" 2>/dev/null; true"
           }
         ]
       }
@@ -77,6 +85,10 @@
           {
             "type": "command",
             "command": "[ -n \"$TMUX_PANE\" ] && tmux set-window-option -t \"$TMUX_PANE\" @agent_state waiting 2>/dev/null; true"
+          },
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && [ -z \"$(tmux show-window-option -v -t \"$TMUX_PANE\" @agent_unread 2>/dev/null)\" ] && ! { [ \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{window_active}')\" = 1 ] && tmux list-clients -t \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{session_name}')\" -F '#{client_flags}' 2>/dev/null | grep -q focused; } && tmux set-window-option -t \"$TMUX_PANE\" @agent_unread \"$(date +%s)\" 2>/dev/null; true"
           }
         ]
       },
@@ -96,6 +108,10 @@
           {
             "type": "command",
             "command": "[ -n \"$TMUX_PANE\" ] && tmux set-window-option -t \"$TMUX_PANE\" @agent_state waiting 2>/dev/null; true"
+          },
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && [ -z \"$(tmux show-window-option -v -t \"$TMUX_PANE\" @agent_unread 2>/dev/null)\" ] && ! { [ \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{window_active}')\" = 1 ] && tmux list-clients -t \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{session_name}')\" -F '#{client_flags}' 2>/dev/null | grep -q focused; } && tmux set-window-option -t \"$TMUX_PANE\" @agent_unread \"$(date +%s)\" 2>/dev/null; true"
           }
         ]
       }
@@ -106,6 +122,10 @@
           {
             "type": "command",
             "command": "[ -n \"$TMUX_PANE\" ] && tmux set-window-option -t \"$TMUX_PANE\" @agent_state done 2>/dev/null; true"
+          },
+          {
+            "type": "command",
+            "command": "[ -n \"$TMUX_PANE\" ] && [ -z \"$(tmux show-window-option -v -t \"$TMUX_PANE\" @agent_unread 2>/dev/null)\" ] && ! { [ \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{window_active}')\" = 1 ] && tmux list-clients -t \"$(tmux display-message -p -t \"$TMUX_PANE\" '#{session_name}')\" -F '#{client_flags}' 2>/dev/null | grep -q focused; } && tmux set-window-option -t \"$TMUX_PANE\" @agent_unread \"$(date +%s)\" 2>/dev/null; true"
           }
         ]
       }
@@ -145,7 +165,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ -n \"$TMUX_PANE\" ] && { tmux set-window-option -t \"$TMUX_PANE\" -u @agent_state 2>/dev/null; tmux set-window-option -t \"$TMUX_PANE\" -u @agent_ctx 2>/dev/null; tmux set-window-option -t \"$TMUX_PANE\" -u @agent_transcript 2>/dev/null; tmux set-window-option -t \"$TMUX_PANE\" -u @agent_pane 2>/dev/null; tmux set-window-option -t \"$TMUX_PANE\" -u @agent_prev_state 2>/dev/null; }; true"
+            "command": "[ -n \"$TMUX_PANE\" ] && { tmux set-window-option -t \"$TMUX_PANE\" -u @agent_state 2>/dev/null; tmux set-window-option -t \"$TMUX_PANE\" -u @agent_ctx 2>/dev/null; tmux set-window-option -t \"$TMUX_PANE\" -u @agent_transcript 2>/dev/null; tmux set-window-option -t \"$TMUX_PANE\" -u @agent_pane 2>/dev/null; tmux set-window-option -t \"$TMUX_PANE\" -u @agent_prev_state 2>/dev/null; tmux set-window-option -t \"$TMUX_PANE\" -u @agent_unread 2>/dev/null; }; true"
           }
         ]
       }

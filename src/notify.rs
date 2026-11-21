@@ -13,7 +13,8 @@ pub struct Event {
     pub target: String,
     pub name: String,
     pub label: &'static str,
-    /// Ring the terminal bell: the agent is done, stuck or waiting for input.
+    /// Ring the terminal bell: the agent is stuck or waiting for input. A
+    /// finished turn only shows up as unread, without sound.
     pub beep: bool,
 }
 
@@ -54,8 +55,8 @@ pub fn transitions(prev: &Snapshot, now: &Snapshot, windows: &[Window]) -> Vec<E
             let (state, stuck) = *now.get(&w.pane_id)?;
             let (label, beep) = if state != prev_state {
                 match state {
-                    AgentState::Waiting | AgentState::Done => (state.label(), true),
-                    AgentState::Error => (state.label(), false),
+                    AgentState::Waiting => (state.label(), true),
+                    AgentState::Done | AgentState::Error => (state.label(), false),
                     _ => return None,
                 }
             } else if stuck && !prev_stuck {
@@ -96,6 +97,7 @@ mod tests {
             group: None,
             window_id: String::new(),
             parent: None,
+            unread: None,
         }
     }
 
@@ -142,14 +144,14 @@ mod tests {
     }
 
     #[test]
-    fn working_to_done_beeps() {
+    fn working_to_done_is_silent() {
         let events = new_test_events(
             &[window("%1", AgentState::Working)],
             &[window("%1", AgentState::Done)],
         );
 
         assert_eq!(events.len(), 1);
-        assert!(events[0].beep);
+        assert!(!events[0].beep);
     }
 
     #[test]

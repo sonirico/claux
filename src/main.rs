@@ -169,6 +169,18 @@ fn parent_of(windows: &[Window], i: usize) -> Option<usize> {
         .position(|p| p.window_id == parent && p.tree_key() == w.tree_key())
 }
 
+/// Row of the window that has been unread the longest, if any.
+fn oldest_unread_row(windows: &[Window], rows: &[Row]) -> Option<usize> {
+    rows.iter()
+        .enumerate()
+        .filter_map(|(r, row)| match row {
+            Row::Window(i) => windows[*i].unread.map(|since| (since, r)),
+            Row::Header(_) => None,
+        })
+        .min()
+        .map(|(_, r)| r)
+}
+
 /// How many forks deep window `i` sits under its tree node.
 fn fork_depth(windows: &[Window], mut i: usize) -> usize {
     let mut depth = 0;
@@ -898,6 +910,15 @@ fn main() -> Result<()> {
                                     }
                                 }
                                 KeyCode::Char('r') => app.refresh(),
+                                KeyCode::Char('u') => {
+                                    match oldest_unread_row(&app.windows, &app.rows) {
+                                        Some(r) => {
+                                            app.list.select(Some(r));
+                                            app.refresh_preview();
+                                        }
+                                        None => app.flash = Some("nothing unread".to_string()),
+                                    }
+                                }
                                 KeyCode::Char('t') => {
                                     app.group_view = !app.group_view;
                                     app.apply_filter();
@@ -1359,6 +1380,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(Span::raw("  "));
         spans.push(Span::styled(format!("{icon} {n}"), style));
     }
+    let unread = app.all.iter().filter(|w| w.unread.is_some()).count();
+    if unread > 0 {
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            format!("\u{2022} {unread} unread (u)"),
+            Style::new().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        ));
+    }
     let total: f64 = app.costs.values().sum();
     if total > 0.0 {
         spans.push(Span::raw("  "));
@@ -1473,9 +1502,10 @@ fn draw_list(frame: &mut Frame, app: &mut App, area: Rect) {
             };
             let dim = Style::new().fg(Color::DarkGray);
 
+            let unread = if w.unread.is_some() { '\u{2022}' } else { ' ' };
             let mut head = vec![
                 Span::raw(indent),
-                Span::styled(format!("{icon} "), style),
+                Span::styled(format!("{icon}{unread}"), style),
                 Span::raw(format!("{:<target_w$} ", target_of(w))),
             ];
             if !stacked {
@@ -1672,7 +1702,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 Line::from(Span::styled(
                     format!(
-                        " enter: focus   {attach_hint}   i: send input   n: new window   f: fork claude   R: resume claude   x: kill   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
+                        " enter: focus   {attach_hint}   i: send input   u: next unread   n: new window   f: fork claude   R: resume claude   x: kill   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
                     ),
                     Style::new().fg(Color::DarkGray),
                 ))
@@ -1720,7 +1750,39 @@ mod tests {
             group: group.map(str::to_string),
             window_id: String::new(),
             parent: None,
+            unread: None,
         }
+    }
+
+    fn new_test_unread_window(index: u32, unread: Option<u64>) -> Window {
+        Window {
+            unread,
+            ..new_test_window("a", index, None)
+        }
+    }
+
+    #[test]
+    fn oldest_unread_row_picks_the_longest_waiting() {
+        let windows = [
+            new_test_unread_window(1, Some(200)),
+            new_test_unread_window(2, None),
+            new_test_unread_window(3, Some(100)),
+        ];
+        let rows = build_rows(&windows, true, &HashSet::new());
+
+        let row = oldest_unread_row(&windows, &rows);
+
+        assert_eq!(row, Some(3));
+    }
+
+    #[test]
+    fn oldest_unread_row_none_when_all_read() {
+        let windows = [new_test_unread_window(1, None)];
+        let rows = build_rows(&windows, false, &HashSet::new());
+
+        let row = oldest_unread_row(&windows, &rows);
+
+        assert_eq!(row, None);
     }
 
     #[test]
