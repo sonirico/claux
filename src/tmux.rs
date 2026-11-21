@@ -96,6 +96,10 @@ pub struct Window {
     /// Window id of the window this one was forked from (`f`), published as
     /// the `@agent_parent` window option. The tree view nests it there.
     pub parent: Option<String>,
+    /// Epoch seconds since the agent finished or started waiting while
+    /// nobody was looking, from the hook-owned `@agent_unread` window option.
+    /// Cleared when the window is visited; `None` means read.
+    pub unread: Option<u64>,
 }
 
 fn tmux(args: &[&str]) -> Result<String> {
@@ -126,7 +130,7 @@ struct PaneLine {
 const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "fish", "dash", "ksh"];
 
 pub fn list_windows() -> Result<Vec<Window>> {
-    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}\t#{@agent_group}\t#{@agent_parent}\t#{@agent_pane}\t#{pane_active}\t#{pane_current_command}\t#{window_id}";
+    let fmt = "#{session_name}\t#{window_index}\t#{@agent_state}\t#{window_name}\t#{b:pane_current_path}\t#{@agent_ctx}\t#{pane_id}\t#{pane_width}\t#{pane_height}\t#{@agent_transcript}\t#{window_activity}\t#{@agent_group}\t#{@agent_parent}\t#{@agent_pane}\t#{pane_active}\t#{pane_current_command}\t#{window_id}\t#{@agent_unread}";
     let out = tmux(&["list-panes", "-a", "-F", fmt])?;
     Ok(agent_panes(out.lines().filter_map(parse_line).collect()))
 }
@@ -170,6 +174,7 @@ fn parse_line(line: &str) -> Option<PaneLine> {
     let is_active = f.next().is_none_or(|s| s == "1");
     let command = f.next().unwrap_or("");
     let window_id = f.next().unwrap_or("").to_string();
+    let unread = f.next().and_then(|s| s.parse().ok());
     if is_agent && state != AgentState::None && SHELLS.contains(&command) {
         state = AgentState::Idle;
     }
@@ -189,6 +194,7 @@ fn parse_line(line: &str) -> Option<PaneLine> {
         group,
         window_id,
         parent,
+        unread,
     };
     Some(PaneLine {
         window,
@@ -555,6 +561,20 @@ mod tests {
         assert_eq!(window.group, Some("grp1".to_string()));
         assert_eq!(window.parent, Some("@1".to_string()));
         assert_eq!(window.window_id, "@0");
+    }
+
+    #[test]
+    fn parse_line_unread_since() {
+        let line = "sess\t0\tdone\twin\t/tmp\t\t%3\t80\t24\t\t0\t\t\t%3\t1\tclaude\t@0\t1700000100";
+        let window = parse_line(line).unwrap().window;
+        assert_eq!(window.unread, Some(1700000100));
+    }
+
+    #[test]
+    fn parse_line_without_unread_is_read() {
+        let line = "sess\t0\tdone\twin\t/tmp\t\t%3\t80\t24\t\t0\t\t\t%3\t1\tclaude\t@0\t";
+        let window = parse_line(line).unwrap().window;
+        assert_eq!(window.unread, None);
     }
 
     #[test]

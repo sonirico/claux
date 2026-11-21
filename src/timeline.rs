@@ -113,6 +113,7 @@ mod tests {
             group: None,
             window_id: String::new(),
             parent: None,
+            unread: None,
         }
     }
 
