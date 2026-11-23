@@ -74,8 +74,9 @@ forks the selected agent's Claude session into a new window (`name~fork`,
 same directory and group, nested under its parent in the tree view, the
 original keeps running), R sends
 `claude --continue` (resume an agent after a reboot/restore), x kills,
-v runs the `CLAUX_KEY_V` shell command and quits like o (e.g. switch to a
-session: `export CLAUX_KEY_V='tmux switch-client -t =grafana'`),
+v runs the `CLAUX_KEY_V` shell command and jumps like o to the session it
+prints last (e.g. `export CLAUX_KEY_V='tmux has-session -t =logs ||
+tmux new-session -d -s logs; echo logs'`),
 / filters, j/k move, g/G first/last, r forces a refresh, q/esc quits,
 m opens mosaic mode (see below).
 The list adapts to the panel width: the target column is measured rather

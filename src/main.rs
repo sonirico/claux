@@ -103,12 +103,17 @@ fn run_group_close(cmd: &str, group: &str) -> String {
     }
 }
 
-/// Runs the `CLAUX_KEY_V` command through `sh -c`. What it does (jump to a
-/// session, open a tool) is entirely the command's business; a failure comes
-/// back as one flash line.
-fn run_key_command(cmd: &str) -> Result<(), String> {
+/// Runs the `CLAUX_KEY_V` command through `sh -c` and returns the session it
+/// prints last, which `v` then jumps to like `o`. Making that session exist is
+/// entirely the command's business; a failure comes back as one flash line.
+fn run_key_command(cmd: &str) -> Result<String, String> {
     match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
-        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .ok_or_else(|| "printed no session".to_string()),
         Ok(out) => Err(failure_line(&out)),
         Err(e) => Err(e.to_string()),
     }
@@ -1065,8 +1070,22 @@ fn main() -> Result<()> {
                                 }
                                 KeyCode::Char('v') => match std::env::var("CLAUX_KEY_V") {
                                     Ok(cmd) => match run_key_command(&cmd) {
-                                        Ok(()) if !app.console => return Ok(()),
-                                        Ok(()) => app.refresh(),
+                                        Ok(session) if inside => match tmux::switch(&session) {
+                                            Ok(()) if !app.console => return Ok(()),
+                                            Ok(()) => app.flash = Some(format!("-> {session}")),
+                                            Err(e) => app.flash = Some(e.to_string()),
+                                        },
+                                        Ok(session) => {
+                                            if let Err(e) = suspend_and(terminal, || {
+                                                tmux::attach(&session, &session, TICK, || {
+                                                    app.refresh()
+                                                })
+                                            }) {
+                                                app.flash = Some(e.to_string());
+                                            }
+                                            app.refresh();
+                                            last_tick = Instant::now();
+                                        }
                                         Err(e) => app.flash = Some(format!("v: {e}")),
                                     },
                                     Err(_) => app.flash = Some("CLAUX_KEY_V not set".to_string()),
@@ -1756,8 +1775,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn key_command_that_succeeds_is_ok() {
-        assert_eq!(run_key_command("true"), Ok(()));
+    fn key_command_returns_the_session_it_prints_last() {
+        assert_eq!(
+            run_key_command("echo starting; echo grafana"),
+            Ok("grafana".to_string())
+        );
+    }
+
+    #[test]
+    fn key_command_that_prints_no_session_is_an_error() {
+        assert_eq!(
+            run_key_command("true"),
+            Err("printed no session".to_string())
+        );
     }
 
     #[test]
