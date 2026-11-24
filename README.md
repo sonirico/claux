@@ -72,8 +72,13 @@ selected agent's pane without attaching (empty line = just Enter, to accept
 a default), u selects the oldest unread window, n opens a new window in the selected window's directory, f
 forks the selected agent's Claude session into a new window (`name~fork`,
 same directory and group, nested under its parent in the tree view, the
-original keeps running), R sends
+original keeps running), F does the same but gives the fork its own git
+worktree cut from the parent's HEAD (Claude Code's `claude -w`, so claux
+still never touches git), R sends
 `claude --continue` (resume an agent after a reboot/restore), x kills,
+v runs the `CLAUX_KEY_V` shell command and jumps like o to the session it
+prints last (e.g. `export CLAUX_KEY_V='tmux has-session -t =logs ||
+tmux new-session -d -s logs; echo logs'`),
 / filters, j/k move, g/G first/last, r forces a refresh, q/esc quits,
 m opens mosaic mode (see below).
 The list adapts to the panel width: the target column is measured rather

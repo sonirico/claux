@@ -98,18 +98,37 @@ fn short_group(g: &str) -> String {
 fn run_group_close(cmd: &str, group: &str) -> String {
     match std::process::Command::new(cmd).arg(group).output() {
         Ok(out) if out.status.success() => format!("closed group {}", short_group(group)),
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let msg = stdout
-                .lines()
-                .last()
-                .or_else(|| stderr.lines().last())
-                .unwrap_or("failed");
-            format!("close: {msg}")
-        }
+        Ok(out) => format!("close: {}", failure_line(&out)),
         Err(e) => format!("close: {e}"),
     }
+}
+
+/// Runs the `CLAUX_KEY_V` command through `sh -c` and returns the session it
+/// prints last, which `v` then jumps to like `o`. Making that session exist is
+/// entirely the command's business; a failure comes back as one flash line.
+fn run_key_command(cmd: &str) -> Result<String, String> {
+    match std::process::Command::new("sh").arg("-c").arg(cmd).output() {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .last()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .ok_or_else(|| "printed no session".to_string()),
+        Ok(out) => Err(failure_line(&out)),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// The last line a failed command printed, stdout first.
+fn failure_line(out: &std::process::Output) -> String {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    stdout
+        .lines()
+        .last()
+        .or_else(|| stderr.lines().last())
+        .unwrap_or("failed")
+        .to_string()
 }
 
 #[derive(PartialEq)]
@@ -1000,12 +1019,13 @@ fn main() -> Result<()> {
                                         };
                                     }
                                 }
-                                KeyCode::Char('n') | KeyCode::Char('f') => {
+                                KeyCode::Char('n') | KeyCode::Char('f') | KeyCode::Char('F') => {
                                     if let Some(w) = app.selected().cloned() {
-                                        let spawned = if key.code == KeyCode::Char('f') {
-                                            tmux::fork_window(&w)
-                                        } else {
-                                            tmux::new_window(&w.session, &w.target)
+                                        let spawned = match key.code {
+                                            KeyCode::Char('n') => {
+                                                tmux::new_window(&w.session, &w.target)
+                                            }
+                                            c => tmux::fork_window(&w, c == KeyCode::Char('F')),
                                         };
                                         match spawned {
                                             Ok(target) => {
@@ -1049,6 +1069,28 @@ fn main() -> Result<()> {
                                         app.mode = Mode::Mosaic;
                                     }
                                 }
+                                KeyCode::Char('v') => match std::env::var("CLAUX_KEY_V") {
+                                    Ok(cmd) => match run_key_command(&cmd) {
+                                        Ok(session) if inside => match tmux::switch(&session) {
+                                            Ok(()) if !app.console => return Ok(()),
+                                            Ok(()) => app.flash = Some(format!("-> {session}")),
+                                            Err(e) => app.flash = Some(e.to_string()),
+                                        },
+                                        Ok(session) => {
+                                            if let Err(e) = suspend_and(terminal, || {
+                                                tmux::attach(&session, &session, TICK, || {
+                                                    app.refresh()
+                                                })
+                                            }) {
+                                                app.flash = Some(e.to_string());
+                                            }
+                                            app.refresh();
+                                            last_tick = Instant::now();
+                                        }
+                                        Err(e) => app.flash = Some(format!("v: {e}")),
+                                    },
+                                    Err(_) => app.flash = Some("CLAUX_KEY_V not set".to_string()),
+                                },
                                 KeyCode::Char('o') => {
                                     if inside {
                                         if act_and_maybe_exit(&mut app, tmux::jump) {
@@ -1702,7 +1744,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 Line::from(Span::styled(
                     format!(
-                        " enter: focus   {attach_hint}   i: send input   u: next unread   n: new window   f: fork claude   R: resume claude   x: kill   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
+                        " enter: focus   {attach_hint}   i: send input   u: next unread   n: new window   f: fork claude   F: fork in worktree   R: resume claude   x: kill   v: CLAUX_KEY_V   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
                     ),
                     Style::new().fg(Color::DarkGray),
                 ))
@@ -1732,6 +1774,38 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_command_returns_the_session_it_prints_last() {
+        assert_eq!(
+            run_key_command("echo starting; echo grafana"),
+            Ok("grafana".to_string())
+        );
+    }
+
+    #[test]
+    fn key_command_that_prints_no_session_is_an_error() {
+        assert_eq!(
+            run_key_command("true"),
+            Err("printed no session".to_string())
+        );
+    }
+
+    #[test]
+    fn key_command_that_fails_reports_its_last_line() {
+        assert_eq!(
+            run_key_command("echo first; echo boom; exit 3"),
+            Err("boom".to_string())
+        );
+    }
+
+    #[test]
+    fn key_command_that_fails_silently_on_stdout_reports_stderr() {
+        assert_eq!(
+            run_key_command("echo oops >&2; exit 1"),
+            Err("oops".to_string())
+        );
+    }
 
     fn new_test_window(session: &str, index: u32, group: Option<&str>) -> Window {
         Window {

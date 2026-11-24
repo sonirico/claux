@@ -411,9 +411,11 @@ pub fn new_window(session: &str, dir_of: &str) -> Result<String> {
 /// New window beside `src` running a fork of its Claude session: same
 /// directory, name suffixed `~fork`, same `@agent_group`, `@agent_parent`
 /// pointing back at `src`. The fork gets its
-/// own session id, so the original keeps going untouched. Returns the new
-/// window's target like `new_window`.
-pub fn fork_window(src: &Window) -> Result<String> {
+/// own session id, so the original keeps going untouched. With `worktree`
+/// Claude Code also gives the fork its own git worktree (`claude -w`), cut
+/// from the parent's HEAD; claux itself still never touches git. Returns the
+/// new window's target like `new_window`.
+pub fn fork_window(src: &Window, worktree: bool) -> Result<String> {
     let Some(id) = src.transcript.as_deref().and_then(session_id) else {
         bail!("no transcript to fork in {}", src.target);
     };
@@ -434,8 +436,34 @@ pub fn fork_window(src: &Window) -> Result<String> {
         "@agent_parent",
         &src.window_id,
     ])?;
-    send_line(&target, &format!("claude --resume {id} --fork-session"))?;
+    let mut cmd = format!("claude --resume {id} --fork-session");
+    if worktree {
+        let wid = tmux(&["display-message", "-p", "-t", &target, "#{window_id}"])?;
+        cmd.push_str(&format!(" -w {}", worktree_name(&src.name, &wid)));
+    }
+    send_line(&target, &cmd)?;
     Ok(target)
+}
+
+/// `claude -w` turns the name into a branch (`worktree-<name>`), so keep it
+/// to safe characters; the new window's id keeps two forks of one window
+/// apart.
+fn worktree_name(window: &str, window_id: &str) -> String {
+    let base: String = window
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    format!(
+        "{}-fork{}",
+        base.trim_matches('-'),
+        window_id.trim().trim_start_matches('@')
+    )
 }
 
 /// Claude Code names each transcript `<session-id>.jsonl`.
@@ -448,7 +476,7 @@ fn session_id(transcript: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{AgentState, agent_panes, key_args, parse_line, session_id};
+    use super::{AgentState, agent_panes, key_args, parse_line, session_id, worktree_name};
     use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     fn args(code: KeyCode, mods: KeyModifiers) -> Option<Vec<String>> {
@@ -656,5 +684,13 @@ mod tests {
         let window = parse_line(&line).unwrap().window;
 
         assert_eq!(window.state, AgentState::Working);
+    }
+
+    #[test]
+    fn worktree_name_is_branch_safe_and_unique_per_window() {
+        assert_eq!(
+            worktree_name("ee~fork: fix/x", "@42\n"),
+            "ee-fork--fix-x-fork42"
+        );
     }
 }
