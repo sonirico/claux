@@ -1019,12 +1019,13 @@ fn main() -> Result<()> {
                                         };
                                     }
                                 }
-                                KeyCode::Char('n') | KeyCode::Char('f') => {
+                                KeyCode::Char('n') | KeyCode::Char('f') | KeyCode::Char('F') => {
                                     if let Some(w) = app.selected().cloned() {
-                                        let spawned = if key.code == KeyCode::Char('f') {
-                                            tmux::fork_window(&w)
-                                        } else {
-                                            tmux::new_window(&w.session, &w.target)
+                                        let spawned = match key.code {
+                                            KeyCode::Char('n') => {
+                                                tmux::new_window(&w.session, &w.target)
+                                            }
+                                            c => tmux::fork_window(&w, c == KeyCode::Char('F')),
                                         };
                                         match spawned {
                                             Ok(target) => {
@@ -1743,7 +1744,7 @@ fn draw_footer(frame: &mut Frame, app: &App, area: Rect) {
                 };
                 Line::from(Span::styled(
                     format!(
-                        " enter: focus   {attach_hint}   i: send input   u: next unread   n: new window   f: fork claude   R: resume claude   x: kill   v: CLAUX_KEY_V   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
+                        " enter: focus   {attach_hint}   i: send input   u: next unread   n: new window   f: fork claude   F: fork in worktree   R: resume claude   x: kill   v: CLAUX_KEY_V   /: filter   r: refresh   {group_hint}   q: quit   m: mosaic"
                     ),
                     Style::new().fg(Color::DarkGray),
                 ))
